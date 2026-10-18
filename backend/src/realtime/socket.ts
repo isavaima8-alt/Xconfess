@@ -43,6 +43,78 @@ const RANKING_REASON_LABELS: Record<RankingReasonCode, string> = {
 const personalizationDisabled = new Map<string, boolean>();
 const mutedSignals = new Map<string, Set<RankingReasonCode>>();
 
+// Staged rollout for ranking configuration. Each configuration is versioned so
+// a change is identifiable and reversible. A candidate is compared against the
+// current configuration on an isolated fixture set before it can be promoted;
+// rollout and rollback are gated on explicit, observable criteria.
+interface RankingConfig {
+  version: string;
+  weights: Record<RankingReasonCode, number>;
+}
+
+interface RankingFixture {
+  id: string;
+  codes: RankingReasonCode[];
+}
+
+// Isolated fixture set: never derived from live user activity.
+const RANKING_FIXTURES: RankingFixture[] = [
+  { id: 'fx-follow', codes: ['followed_author'] },
+  { id: 'fx-interest', codes: ['similar_to_your_interests'] },
+  { id: 'fx-topic', codes: ['recently_engaged_topic'] },
+  { id: 'fx-network', codes: ['trending_in_your_network'] },
+  { id: 'fx-fallback', codes: ['chronological_fallback'] },
+];
+
+// Bounded comparison: candidate must stay within this relative delta of the
+// current configuration on the fixture set, otherwise rollout is rejected.
+const MAX_RELATIVE_DELTA = 0.25;
+
+const DEFAULT_RANKING_CONFIG: RankingConfig = {
+  version: 'v1',
+  weights: {
+    followed_author: 1,
+    similar_to_your_interests: 0.8,
+    recently_engaged_topic: 0.6,
+    trending_in_your_network: 0.5,
+    chronological_fallback: 0.1,
+  },
+};
+
+let currentRankingConfig: RankingConfig = DEFAULT_RANKING_CONFIG;
+let pendingRankingConfig: RankingConfig | null = null;
+let lastRollout: { from: string; to: string; at: number } | null = null;
+let lastRollback: { from: string; to: string; at: number } | null = null;
+
+function scoreConfig(config: RankingConfig): number {
+  let total = 0;
+  for (const fixture of RANKING_FIXTURES) {
+    for (const code of fixture.codes) total += config.weights[code] ?? 0;
+  }
+  return total;
+}
+
+function isRankingConfig(value: unknown): value is RankingConfig {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as { version?: unknown; weights?: unknown };
+  if (typeof candidate.version !== 'string' || candidate.version.length === 0) return false;
+  if (!candidate.weights || typeof candidate.weights !== 'object') return false;
+  const weights = candidate.weights as Record<string, unknown>;
+  return RANKING_REASON_CODES.every((code) => typeof weights[code] === 'number' && Number.isFinite(weights[code]));
+}
+
+function compareOnFixtures(candidate: RankingConfig): {
+  currentScore: number;
+  candidateScore: number;
+  relativeDelta: number;
+  withinBounds: boolean;
+} {
+  const currentScore = scoreConfig(currentRankingConfig);
+  const candidateScore = scoreConfig(candidate);
+  const relativeDelta = currentScore === 0 ? 0 : Math.abs(candidateScore - currentScore) / currentScore;
+  return { currentScore, candidateScore, relativeDelta, withinBounds: relativeDelta <= MAX_RELATIVE_DELTA };
+}
+
 function isRankingReasonCode(value: unknown): value is RankingReasonCode {
   return typeof value === 'string' && (RANKING_REASON_CODES as readonly string[]).includes(value);
 }
@@ -197,9 +269,81 @@ export function attachRealtime(server: HttpServer): Server {
       respond?.({ ok: true, personalized: true, muted: [] });
     });
 
+    // Staged rollout: stage a candidate configuration and compare it against the
+    // current configuration on the isolated fixture set. Rejects invalid or
+    // out-of-bounds candidates so a broad change cannot be applied blindly.
+    socket.on('ranking:stage-config', (candidate: unknown, ack?: unknown) => {
+      const respond = typeof ack === 'function' ? (ack as (res: unknown) => void) : undefined;
+      if (!isRankingConfig(candidate)) {
+        respond?.({ ok: false, error: 'invalid_config' });
+        return;
+      }
+      if (candidate.version === currentRankingConfig.version) {
+        respond?.({ ok: false, error: 'version_conflict' });
+        return;
+      }
+      const comparison = compareOnFixtures(candidate);
+      if (!comparison.withinBounds) {
+        respond?.({ ok: false, error: 'out_of_bounds', ...comparison });
+        return;
+      }
+      pendingRankingConfig = candidate;
+      respond?.({ ok: true, currentVersion: currentRankingConfig.version, candidateVersion: candidate.version, ...comparison });
+    });
+
+    // Promote the staged candidate. Requires a staged candidate that still
+    // passes the bounded comparison; records an observable rollout event.
+    socket.on('ranking:rollout', (ack?: unknown) => {
+      const respond = typeof ack === 'function' ? (ack as (res: unknown) => void) : undefined;
+      if (!pendingRankingConfig) {
+        respond?.({ ok: false, error: 'no_staged_config' });
+        return;
+      }
+      const comparison = compareOnFixtures(pendingRankingConfig);
+      if (!comparison.withinBounds) {
+        respond?.({ ok: false, error: 'out_of_bounds', ...comparison });
+        return;
+      }
+      const from = currentRankingConfig.version;
+      currentRankingConfig = pendingRankingConfig;
+      pendingRankingConfig = null;
+      lastRollout = { from, to: currentRankingConfig.version, at: Date.now() };
+      logger.info({ from, to: currentRankingConfig.version }, 'ranking config rolled out');
+      respond?.({ ok: true, version: currentRankingConfig.version, rollout: lastRollout });
+    });
+
+    // Fast rollback path: restore the previous configuration version. Fails
+    // explicitly when there is no rollout to roll back.
+    socket.on('ranking:rollback', (ack?: unknown) => {
+      const respond = typeof ack === 'function' ? (ack as (res: unknown) => void) : undefined;
+      if (!lastRollout) {
+        respond?.({ ok: false, error: 'nothing_to_rollback' });
+        return;
+      }
+      const from = currentRankingConfig.version;
+      currentRankingConfig = { ...DEFAULT_RANKING_CONFIG, version: lastRollout.from };
+      pendingRankingConfig = null;
+      lastRollback = { from, to: currentRankingConfig.version, at: Date.now() };
+      lastRollout = null;
+      logger.info({ from, to: currentRankingConfig.version }, 'ranking config rolled back');
+      respond?.({ ok: true, version: currentRankingConfig.version, rollback: lastRollback });
+    });
+
+    // Observable rollout/rollback state for operators.
+    socket.on('ranking:config-status', (ack?: unknown) => {
+      const respond = typeof ack === 'function' ? (ack as (res: unknown) => void) : undefined;
+      respond?.({
+        ok: true,
+        currentVersion: currentRankingConfig.version,
+        pendingVersion: pendingRankingConfig?.version ?? null,
+        lastRollout,
+        lastRollback,
+      });
+    });
+
     // Reconnect cleanup: remove stale presence/typing state on disconnect.
     socket.on('disconnect', () => {
-      logger.debug({ userId }, 'realtime disconnect, cleaning presence/typing');
+      logger.debug({ userId }, 'realtime disconnect');
       cleanupUser(io, userId);
     });
   });

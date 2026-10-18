@@ -178,3 +178,190 @@ export function normalizeQuery(
 ): string[] {
   return normalizeForSearch(input, options).tokens;
 }
+
+/**
+ * Ranking configuration parameters that affect feed ordering. These are the
+ * versioned knobs a staged rollout can compare and roll back.
+ */
+export interface RankingParameters {
+  /** Weight applied to lexical/token overlap between query and document. */
+  lexicalWeight: number;
+  /** Weight applied to recency decay. */
+  recencyWeight: number;
+  /** Weight applied to engagement signals. */
+  engagementWeight: number;
+  /** Half-life (in hours) for recency decay; must be > 0. */
+  recencyHalfLifeHours: number;
+}
+
+/** A versioned, immutable ranking configuration snapshot. */
+export interface RankingConfigVersion {
+  /** Monotonic version identifier; each change is identifiable and reversible. */
+  version: number;
+  /** Human-readable label for the change (e.g. PR or ticket reference). */
+  label: string;
+  parameters: RankingParameters;
+}
+
+/** A single isolated fixture used to compare candidate vs current configs. */
+export interface RankingFixture {
+  id: string;
+  /** Relevance score in [0, 1] the ideal ranking would assign. */
+  relevance: number;
+  /** Age of the item in hours (drives recency decay). */
+  ageHours: number;
+  /** Engagement score in [0, 1]. */
+  engagement: number;
+  /** Lexical/token overlap score in [0, 1]. */
+  lexical: number;
+}
+
+/** Observable rollout/rollback criteria for a staged rollout. */
+export interface RolloutCriteria {
+  /** Maximum allowed mean absolute score delta per fixture before rollout is blocked. */
+  maxMeanAbsDelta: number;
+  /** Maximum allowed fraction of fixtures whose rank order flips. */
+  maxRankFlipRatio: number;
+}
+
+export interface RankingComparison {
+  /** Mean absolute score delta between candidate and current across fixtures. */
+  meanAbsDelta: number;
+  /** Fraction of fixtures whose relative rank order changed. */
+  rankFlipRatio: number;
+  /** True when both observable criteria are within bounds. */
+  withinBounds: boolean;
+  /** Per-fixture deltas for observability/debugging. */
+  deltas: Array<{ id: string; current: number; candidate: number; delta: number }>;
+}
+
+export type RolloutDecision =
+  | { action: 'rollout'; comparison: RankingComparison }
+  | { action: 'rollback'; comparison: RankingComparison; reason: string };
+
+const DEFAULT_ROLLOUT_CRITERIA: RolloutCriteria = {
+  maxMeanAbsDelta: 0.15,
+  maxRankFlipRatio: 0.25,
+};
+
+function assertFiniteNonNegative(value: number, name: string): void {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new Error(`Invalid ranking parameter "${name}": expected finite non-negative number`);
+  }
+}
+
+/**
+ * Validate ranking parameters. Throws on invalid input so a bad configuration
+ * fails fast at the owning boundary rather than silently degrading the feed.
+ */
+export function validateRankingParameters(parameters: RankingParameters): void {
+  assertFiniteNonNegative(parameters.lexicalWeight, 'lexicalWeight');
+  assertFiniteNonNegative(parameters.recencyWeight, 'recencyWeight');
+  assertFiniteNonNegative(parameters.engagementWeight, 'engagementWeight');
+  if (
+    typeof parameters.recencyHalfLifeHours !== 'number' ||
+    !Number.isFinite(parameters.recencyHalfLifeHours) ||
+    parameters.recencyHalfLifeHours <= 0
+  ) {
+    throw new Error('Invalid ranking parameter "recencyHalfLifeHours": expected finite positive number');
+  }
+}
+
+/**
+ * Create a new versioned ranking configuration. Each call yields a distinct,
+ * immutable snapshot so changes are identifiable and reversible.
+ */
+export function createRankingConfigVersion(
+  version: number,
+  label: string,
+  parameters: RankingParameters,
+): RankingConfigVersion {
+  if (!Number.isInteger(version) || version < 1) {
+    throw new Error('Invalid ranking config version: expected positive integer');
+  }
+  validateRankingParameters(parameters);
+  return Object.freeze({
+    version,
+    label,
+    parameters: Object.freeze({ ...parameters }),
+  });
+}
+
+/** Score a fixture under a given ranking configuration. */
+export function scoreFixture(fixture: RankingFixture, parameters: RankingParameters): number {
+  const decay = Math.pow(0.5, fixture.ageHours / parameters.recencyHalfLifeHours);
+  return (
+    parameters.lexicalWeight * fixture.lexical +
+    parameters.recencyWeight * decay +
+    parameters.engagementWeight * fixture.engagement
+  );
+}
+
+/**
+ * Compare a candidate configuration against the current one on an isolated
+ * fixture set. Pure and side-effect free so it can run before any rollout.
+ */
+export function compareRankingConfigs(
+  current: RankingConfigVersion,
+  candidate: RankingConfigVersion,
+  fixtures: RankingFixture[],
+  criteria: RolloutCriteria = DEFAULT_ROLLOUT_CRITERIA,
+): RankingComparison {
+  validateRankingParameters(current.parameters);
+  validateRankingParameters(candidate.parameters);
+
+  const deltas = fixtures.map((fixture) => {
+    const currentScore = scoreFixture(fixture, current.parameters);
+    const candidateScore = scoreFixture(fixture, candidate.parameters);
+    return {
+      id: fixture.id,
+      current: currentScore,
+      candidate: candidateScore,
+      delta: candidateScore - currentScore,
+    };
+  });
+
+  const meanAbsDelta =
+    deltas.length === 0
+      ? 0
+      : deltas.reduce((sum, d) => sum + Math.abs(d.delta), 0) / deltas.length;
+
+  // Rank flip: relative order of a fixture pair changes between configs.
+  let flips = 0;
+  let pairs = 0;
+  for (let i = 0; i < deltas.length; i += 1) {
+    for (let j = i + 1; j < deltas.length; j += 1) {
+      pairs += 1;
+      const currentOrder = Math.sign(deltas[i].current - deltas[j].current);
+      const candidateOrder = Math.sign(deltas[i].candidate - deltas[j].candidate);
+      if (currentOrder !== candidateOrder) flips += 1;
+    }
+  }
+  const rankFlipRatio = pairs === 0 ? 0 : flips / pairs;
+
+  const withinBounds =
+    meanAbsDelta <= criteria.maxMeanAbsDelta && rankFlipRatio <= criteria.maxRankFlipRatio;
+
+  return { meanAbsDelta, rankFlipRatio, withinBounds, deltas };
+}
+
+/**
+ * Decide whether to roll out or roll back a candidate configuration based on
+ * observable criteria. Rollback is the default on any out-of-bounds signal.
+ */
+export function decideRollout(
+  current: RankingConfigVersion,
+  candidate: RankingConfigVersion,
+  fixtures: RankingFixture[],
+  criteria: RolloutCriteria = DEFAULT_ROLLOUT_CRITERIA,
+): RolloutDecision {
+  const comparison = compareRankingConfigs(current, candidate, fixtures, criteria);
+  if (comparison.withinBounds) {
+    return { action: 'rollout', comparison };
+  }
+  const reason =
+    comparison.meanAbsDelta > criteria.maxMeanAbsDelta
+      ? `mean absolute delta ${comparison.meanAbsDelta.toFixed(4)} exceeds ${criteria.maxMeanAbsDelta}`
+      : `rank flip ratio ${comparison.rankFlipRatio.toFixed(4)} exceeds ${criteria.maxRankFlipRatio}`;
+  return { action: 'rollback', comparison, reason };
+}
