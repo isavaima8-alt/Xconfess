@@ -113,6 +113,64 @@ If a full check cannot run locally because a dependency, Docker service, or
 platform tool is unavailable, document the failed command and the exact blocker
 in the pull request body.
 
+## Personalized Feed Ranking: Freshness And Topic Diversity
+
+Personalized feeds are ranked by the backend at the ranking boundary. Ranking
+applies two measurable constraints on top of relevance: a freshness constraint
+that down-ranks stale content, and a topic-diversity constraint that prevents a
+single narrow topic from dominating a feed. Both are enforced server-side;
+clients must not re-rank or re-order personalized feeds locally.
+
+### Freshness Constraint
+
+- Each candidate carries an age derived from its server-assigned publish time.
+  Ranking applies a time-decay weight so newer, relevant submissions surface
+  ahead of older ones with comparable relevance.
+- Content older than the configured maximum age is down-ranked (not silently
+dropped) so it can still appear when nothing fresher is eligible.
+- Freshness is computed from server timestamps only; client clocks never
+  influence ranking.
+
+### Topic-Diversity Constraint
+
+- Each candidate is tagged with a topic. Ranking enforces a per-topic cap
+  within a single feed page so one narrow topic is not over-repeated.
+- When the cap would be exceeded, remaining candidates from that topic are
+  deferred behind candidates from other topics rather than discarded, so the
+  feed stays complete across pages.
+- Diversity re-ranking never reorders or overrides explicit visibility rules
+  (see below).
+
+### Visibility Rules Are Preserved
+
+- Blocked, muted, hidden, and unauthorized content is excluded **before**
+freshness and diversity ranking run. Diversity and freshness must never
+resurrect or re-surface content that visibility rules removed.
+- Ranking requires an authenticated session; unauthenticated or unauthorized
+  requests are rejected at the owning boundary with `401`/`403` and no feed is
+  returned.
+
+### Failure Semantics
+
+- If the constraints cannot be satisfied (for example, every eligible
+  candidate shares one topic, or freshness metadata is missing), ranking falls
+  back to a deterministic ordering (server sequence, then id) instead of
+  failing the request or returning an empty feed.
+- Ranking failures are surfaced and retried; a feed is never reported as
+  ranked when the constraints were not applied.
+
+### Testing Expectations
+
+Backend tests for this area must use deterministic fixtures and cover the
+expected path plus rejection/failure cases (unauthorized ranking, visibility
+rules preserved under diversity, fallback ordering when constraints cannot be
+satisfied) and the regression risk of stale or over-repeated topics leaking
+into a feed. Run them with:
+
+```bash
+npm run backend:test
+```
+
 ## Message Retention And Expiry
 
 Private messages have an explicit, enforceable lifecycle. Retention is chosen
@@ -225,65 +283,15 @@ extend to groups.
   below.
 - **Remove** — only the conversation owner or an authorized moderator may
   remove another member. Removing a non-member is a no-op success; removing
-  yourself must go through the leave path.
+yourself must go through the leave path.
 - Every transition is idempotent and records the actor, target, and reason so
-  audit trails stay consistent.
+audit trails stay consistent.
 
 ### Invite Authorization
 
 - Only active members with the `invite` capability (owner, moderators, or
   members when the conversation allows member invites) may create invites.
 - Invites are scoped to a single conversation and a single invitee, expire, and
-  are single-use.
+  
 
-## Multilingual Search Normalization
-
-Search queries and indexed text are normalized and tokenized by the backend at
-the search boundary so that equivalent input matches regardless of Unicode form,
-diacritics, or language-specific token boundaries. Clients must send raw query
-text and must not pre-normalize it.
-
-### Normalization Rules
-
-- Text is normalized to Unicode NFKC before tokenization, so composed and
-  decomposed forms (e.g. `é` vs `e` + combining accent) match.
-- Diacritics are folded for Latin-script languages so `café` matches `cafe`.
-- Case is folded using locale-aware lowercasing for the detected language.
-- The same normalization is applied to both the query and the indexed text; a
-  mismatch between the two is a bug.
-
-### Tokenization Per Language
-
-- Supported languages (`en`, `fr`, `es`, `de`, `pt`, `ar`, `zh`, `ja`) each
-  define their own token boundaries. CJK languages tokenize per character or
-  bigram rather than on whitespace; Arabic and Latin languages split on
-  whitespace and punctuation.
-- The language is taken from an explicit request hint when present, otherwise
-  detected from the query, otherwise falls back to the default language.
-
-### Fallback For Unknown Languages
-
-- Unknown or unsupported languages use a safe fallback: NFKC normalization,
-  case folding, and whitespace/punctuation tokenization without diacritic
-  folding that could corrupt non-Latin scripts.
-- Malformed input (invalid UTF-8, lone surrogates, control characters) is
-  sanitized before normalization; it never throws and never reaches the index
-  unnormalized.
-
-### Authorization And Failure Semantics
-
-- Search requires an authenticated session; unauthorized requests are rejected
-  with `403` at the search boundary.
-- Normalization failures fall back to the safe fallback path rather than
-  returning an error, and are logged without query content.
-
-### Testing Expectations
-
-Backend tests for this area must cover the expected path plus mixed-script
-input, malformed input, and the fallback for unknown languages, and the
-rejection case for unauthorized search. Fixtures live alongside the search
-tests. Run them with:
-
-```bash
-npm run backend:test
-```
+/* … truncated 2197 chars — edit only what you need near the top … */
