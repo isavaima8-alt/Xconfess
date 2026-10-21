@@ -19,9 +19,11 @@ describe('ExportProcessor', () => {
   beforeEach(async () => {
     exportRepo = {
       update: jest.fn(),
+      findOneBy: jest.fn().mockResolvedValue(null),
     };
     chunkRepo = {
       save: jest.fn(),
+      delete: jest.fn(),
     };
     userRepo = {
       findOneBy: jest.fn(),
@@ -30,9 +32,12 @@ describe('ExportProcessor', () => {
       compileUserData: jest.fn(),
       convertToCsv: jest.fn(() => 'test,csv'),
       markExportFailed: jest.fn(),
-      markExportProcessing: jest.fn(),
+      markExportProcessing: jest.fn().mockResolvedValue(true),
+      getExportPrivacySnapshotVersion: jest.fn().mockResolvedValue('snapshot-v1'),
+      cancelExportForPrivacyChange: jest.fn().mockResolvedValue(undefined),
       isExportCancelled: jest.fn(async () => false), // Issue #106: cancellation check
     };
+    exportRepo.update.mockResolvedValue({ affected: 1 });
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -93,9 +98,10 @@ describe('ExportProcessor', () => {
       expect(dataExportService.compileUserData).toHaveBeenCalled();
       expect(dataExportService.markExportProcessing).toHaveBeenCalledWith(
         'req-1',
+        'snapshot-v1',
       );
       expect(exportRepo.update).toHaveBeenCalledWith(
-        'req-1',
+        { id: 'req-1', status: 'PROCESSING', privacySnapshotVersion: 'snapshot-v1' },
         expect.objectContaining({
           status: 'READY',
           isChunked: true,
@@ -114,10 +120,11 @@ describe('ExportProcessor', () => {
         new Error('Test error'),
       );
 
-      await processor.process(mockJob);
+      await expect(processor.process(mockJob)).rejects.toThrow('Test error');
 
       expect(dataExportService.markExportProcessing).toHaveBeenCalledWith(
         'req-1',
+        'snapshot-v1',
       );
       expect(dataExportService.markExportFailed).toHaveBeenCalledWith(
         'req-1',
@@ -135,10 +142,10 @@ describe('ExportProcessor', () => {
         new Error('timeout'),
       );
 
-      await processor.process(mockJob);
+      await expect(processor.process(mockJob)).rejects.toThrow('timeout');
 
       expect(exportRepo.update).not.toHaveBeenCalledWith(
-        'req-fail',
+        expect.objectContaining({ id: 'req-fail' }),
         expect.objectContaining({ status: 'READY' }),
       );
       expect(dataExportService.markExportFailed).toHaveBeenCalledWith(
@@ -157,11 +164,36 @@ describe('ExportProcessor', () => {
         new Error('DB connection lost'),
       );
 
-      await processor.process(mockJob);
+      await expect(processor.process(mockJob)).rejects.toThrow('DB connection lost');
 
       expect(dataExportService.markExportFailed).toHaveBeenCalledWith(
         'req-err',
         'DB connection lost',
+      );
+    });
+
+    it('cancels and removes partial chunks when privacy changes during compilation', async () => {
+      const mockJob = {
+        name: 'process-export',
+        data: { userId: '1', requestId: 'req-race' },
+      } as Job;
+      dataExportService.getExportPrivacySnapshotVersion
+        .mockResolvedValueOnce('snapshot-v1')
+        .mockResolvedValueOnce('snapshot-v2');
+      dataExportService.compileUserData.mockResolvedValue({
+        userId: '1',
+        confessions: [],
+      });
+
+      await processor.process(mockJob);
+
+      expect(dataExportService.cancelExportForPrivacyChange).toHaveBeenCalledWith(
+        'req-race',
+      );
+      expect(chunkRepo.save).not.toHaveBeenCalled();
+      expect(exportRepo.update).not.toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'req-race' }),
+        expect.objectContaining({ status: 'READY' }),
       );
     });
 

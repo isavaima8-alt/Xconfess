@@ -3,10 +3,15 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { getQueueToken } from '@nestjs/bull';
 import { ConfigService } from '@nestjs/config';
-import { NotFoundException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  GoneException,
+  NotFoundException,
+} from '@nestjs/common';
 import { DataExportService } from './data-export.service';
 import { ExportRequest } from './entities/export-request.entity';
 import { ExportChunk } from './entities/export-chunk.entity';
+import { User } from '../user/entities/user.entity';
 import { AuditLogService } from '../audit-log/audit-log.service';
 import { EXPORT_QUEUE_NAME } from './data-export.constants';
 
@@ -31,10 +36,37 @@ describe('DataExportService', () => {
     save: jest.fn(),
     update: jest.fn(),
     createQueryBuilder: jest.fn(() => mockQueryBuilder as any),
+    manager: {
+      connection: {
+        createQueryRunner: jest.fn(() => ({
+          connect: jest.fn().mockResolvedValue(undefined),
+          release: jest.fn().mockResolvedValue(undefined),
+          manager: {
+            getRepository: jest.fn(() => mockExportRepository),
+          },
+        })),
+      },
+    },
   };
 
   const mockChunkRepository = {
     findOne: jest.fn(),
+    delete: jest.fn(),
+  };
+
+  const mockUserRepository = {
+    findOne: jest.fn(),
+    manager: {
+      connection: {
+        createQueryRunner: jest.fn(() => ({
+          connect: jest.fn().mockResolvedValue(undefined),
+          release: jest.fn().mockResolvedValue(undefined),
+          manager: {
+            getRepository: jest.fn(() => mockUserRepository),
+          },
+        })),
+      },
+    },
   };
 
   const mockExportQueue = {
@@ -67,6 +99,15 @@ describe('DataExportService', () => {
     mockQueryBuilder.andWhere.mockClear();
     mockQueryBuilder.execute.mockClear();
     mockChunkRepository.findOne.mockReset();
+    mockChunkRepository.delete.mockReset();
+    mockUserRepository.findOne.mockReset();
+    mockUserRepository.findOne.mockResolvedValue({
+      id: 42,
+      updatedAt: new Date('2026-03-24T20:00:00.000Z'),
+      is_active: true,
+      privacySettings: { dataProcessingConsent: true },
+      personalizationEnabled: true,
+    });
     mockExportQueue.add.mockReset();
     mockAuditLogService.logExportLifecycleEvent.mockReset();
     mockAuditLogService.logExportLifecycleEvent.mockResolvedValue(undefined);
@@ -89,6 +130,10 @@ describe('DataExportService', () => {
           useValue: mockChunkRepository,
         },
         {
+          provide: getRepositoryToken(User),
+          useValue: mockUserRepository,
+        },
+        {
           provide: getQueueToken(EXPORT_QUEUE_NAME),
           useValue: mockExportQueue,
         },
@@ -104,6 +149,7 @@ describe('DataExportService', () => {
     }).compile();
 
     service = module.get<DataExportService>(DataExportService);
+    jest.spyOn(service, 'assertCanDeliverExport').mockResolvedValue();
   });
 
   it('is defined', () => {
@@ -186,15 +232,66 @@ describe('DataExportService', () => {
     try {
       mockExportRepository.update.mockResolvedValue({ affected: 1 });
 
-      await service.markExportProcessing('req-proc-1');
+      await service.markExportProcessing('req-proc-1', 'snapshot-v1');
 
-      expect(mockExportRepository.update).toHaveBeenCalledWith('req-proc-1', {
-        status: 'PROCESSING',
-        processingAt: new Date('2026-03-24T22:05:00.000Z'),
-      });
+      expect(mockExportRepository.update).toHaveBeenCalledWith(
+        { id: 'req-proc-1', status: expect.anything() },
+        {
+          status: 'PROCESSING',
+          processingAt: new Date('2026-03-24T22:05:00.000Z'),
+          privacySnapshotVersion: 'snapshot-v1',
+        },
+      );
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  it('cancels and purges a ready export when its privacy snapshot is stale', async () => {
+    jest.spyOn(service, 'assertCanDeliverExport').mockRestore();
+    mockExportRepository.findOne.mockResolvedValue({
+      id: 'req-stale',
+      status: 'READY',
+      privacySnapshotVersion: 'stale-version',
+    });
+    mockExportRepository.update.mockResolvedValue({ affected: 1 });
+    mockChunkRepository.delete.mockResolvedValue({ affected: 2 });
+
+    await expect(
+      service.assertCanDeliverExport('req-stale', '42'),
+    ).rejects.toThrow(GoneException);
+
+    expect(mockExportRepository.update).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'req-stale' }),
+      expect.objectContaining({
+        status: 'CANCELLED',
+        fileData: null,
+        downloadTokenHash: null,
+      }),
+    );
+    expect(mockChunkRepository.delete).toHaveBeenCalledWith({
+      exportRequestId: 'req-stale',
+    });
+  });
+
+  it('rejects delivery after data-processing consent is withdrawn', async () => {
+    jest.spyOn(service, 'assertCanDeliverExport').mockRestore();
+    mockExportRepository.findOne.mockResolvedValue({
+      id: 'req-withdrawn',
+      status: 'READY',
+      privacySnapshotVersion: 'snapshot-v1',
+    });
+    mockUserRepository.findOne.mockResolvedValue({
+      id: 42,
+      privacySettings: { dataProcessingConsent: false },
+    });
+
+    await expect(
+      service.assertCanDeliverExport('req-withdrawn', '42'),
+    ).rejects.toThrow(ForbiddenException);
+    expect(mockChunkRepository.delete).toHaveBeenCalledWith({
+      exportRequestId: 'req-withdrawn',
+    });
   });
 
   // ── markExportFailed ───────────────────────────────────────────────────────
@@ -211,12 +308,15 @@ describe('DataExportService', () => {
 
       await service.markExportFailed('req-fail-1', 'out of memory');
 
-      expect(mockExportRepository.update).toHaveBeenCalledWith('req-fail-1', {
-        status: 'FAILED',
-        failedAt: new Date('2026-03-24T22:10:00.000Z'),
-        retryCount: 1,
-        lastFailureReason: 'out of memory',
-      });
+      expect(mockExportRepository.update).toHaveBeenCalledWith(
+        { id: 'req-fail-1', status: 'PROCESSING' },
+        {
+          status: 'FAILED',
+          failedAt: new Date('2026-03-24T22:10:00.000Z'),
+          retryCount: 1,
+          lastFailureReason: 'out of memory',
+        },
+      );
     } finally {
       jest.useRealTimers();
     }
@@ -232,7 +332,7 @@ describe('DataExportService', () => {
     await service.markExportFailed('req-fail-2', 'disk full');
 
     expect(mockExportRepository.update).toHaveBeenCalledWith(
-      'req-fail-2',
+      { id: 'req-fail-2', status: 'PROCESSING' },
       expect.objectContaining({
         retryCount: 2,
         lastFailureReason: 'disk full',
@@ -247,7 +347,7 @@ describe('DataExportService', () => {
     await service.markExportFailed('req-missing', 'error');
 
     expect(mockExportRepository.update).toHaveBeenCalledWith(
-      'req-missing',
+      { id: 'req-missing', status: 'PROCESSING' },
       expect.objectContaining({ retryCount: 1 }),
     );
   });

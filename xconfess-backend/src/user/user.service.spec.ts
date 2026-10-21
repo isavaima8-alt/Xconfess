@@ -11,6 +11,7 @@ import { EmailService } from '../email/email.service';
 import { CryptoUtil } from '../common/crypto.util';
 import { ConfigService } from '@nestjs/config';
 import { ErrorCode } from '../common/errors/error-codes';
+import { DataExportService } from '../data-export/data-export.service';
 
 jest.mock('bcryptjs', () => ({
   hash: jest.fn(),
@@ -22,6 +23,7 @@ describe('UserService', () => {
   let service: UserService;
   let repository: Repository<User>;
   let mockEmailService: any;
+  let mockDataExportService: any;
 
   const mockUser: User = {
     id: 1,
@@ -63,11 +65,15 @@ describe('UserService', () => {
     create: jest.fn(),
     save: jest.fn(),
     update: jest.fn(),
+    remove: jest.fn(),
   };
 
   beforeEach(async () => {
     mockEmailService = {
       sendWelcomeEmail: jest.fn(),
+    };
+    mockDataExportService = {
+      cancelExportsForUser: jest.fn().mockResolvedValue(undefined),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -84,6 +90,10 @@ describe('UserService', () => {
         {
           provide: ConfigService,
           useValue: { get: jest.fn((_key: string, fallback?: unknown) => fallback ?? '') },
+        },
+        {
+          provide: DataExportService,
+          useValue: mockDataExportService,
         },
       ],
     }).compile();
@@ -171,6 +181,10 @@ describe('UserService', () => {
 
       expect(bcrypt.hash).toHaveBeenCalledWith('newpassword123', 10);
       expect(mockRepository.save).toHaveBeenCalled();
+      expect(mockDataExportService.cancelExportsForUser).toHaveBeenCalledWith(
+        '1',
+        'account_deactivated',
+      );
     });
 
     it('should throw InternalServerErrorException on database error', async () => {
@@ -193,6 +207,10 @@ describe('UserService', () => {
       await service.setResetPasswordToken(1, 'reset-token', expiresAt);
 
       expect(mockRepository.save).toHaveBeenCalled();
+      expect(mockDataExportService.cancelExportsForUser).toHaveBeenCalledWith(
+        '1',
+        'account_reactivated',
+      );
     });
 
     it('should throw InternalServerErrorException on database error', async () => {
@@ -623,6 +641,25 @@ describe('UserService', () => {
 
       expect(result).toEqual(dto);
       expect(mockRepository.save).toHaveBeenCalled();
+      expect(mockDataExportService.cancelExportsForUser).toHaveBeenCalledWith(
+        '1',
+        'privacy_settings_changed',
+      );
+    });
+  });
+
+  describe('deleteAccount', () => {
+    it('cancels and purges exports before removing the user', async () => {
+      mockRepository.findOne.mockResolvedValue(mockUser);
+      mockRepository.remove.mockResolvedValue(mockUser);
+
+      await service.deleteAccount(1);
+
+      expect(mockDataExportService.cancelExportsForUser).toHaveBeenCalledWith(
+        '1',
+        'account_deleted',
+      );
+      expect(mockRepository.remove).toHaveBeenCalledWith(mockUser);
     });
   });
 });

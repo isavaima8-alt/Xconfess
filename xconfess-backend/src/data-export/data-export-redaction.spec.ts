@@ -6,6 +6,7 @@ import { DataExportService } from './data-export.service';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { ExportRequest } from './entities/export-request.entity';
 import { ExportChunk } from './entities/export-chunk.entity';
+import { User } from '../user/entities/user.entity';
 import { ConfigService } from '@nestjs/config';
 import { getQueueToken } from '@nestjs/bullmq';
 import { AuditLogService } from '../audit-log/audit-log.service';
@@ -33,6 +34,12 @@ describe('DataExportService - Redaction Policy', () => {
         },
         {
           provide: getRepositoryToken(ExportChunk),
+          useValue: {
+            findOne: jest.fn(),
+          },
+        },
+        {
+          provide: getRepositoryToken(User),
           useValue: {
             findOne: jest.fn(),
           },

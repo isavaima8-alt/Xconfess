@@ -50,8 +50,19 @@ export class ExportProcessor extends WorkerHost {
         return;
       }
 
+      const privacySnapshotVersion =
+        await this.dataExportService.getExportPrivacySnapshotVersion(userId);
+      if (!privacySnapshotVersion) {
+        await this.dataExportService.cancelExportForPrivacyChange(requestId);
+        return;
+      }
+
       // Stamp processingAt and flip status to PROCESSING
-      await this.dataExportService.markExportProcessing(requestId);
+      const processingStarted = await this.dataExportService.markExportProcessing(
+        requestId,
+        privacySnapshotVersion,
+      );
+      if (!processingStarted) return;
 
       // Issue #106: check for cancellation before doing expensive work
       if (await this.dataExportService.isExportCancelled(requestId)) {
@@ -62,8 +73,13 @@ export class ExportProcessor extends WorkerHost {
       const data = await this.dataExportService.compileUserData(userId);
 
       // Issue #106: second cancellation checkpoint — after compilation, before writes
-      if (await this.dataExportService.isExportCancelled(requestId)) {
+      if (
+        (await this.dataExportService.isExportCancelled(requestId)) ||
+        (await this.dataExportService.getExportPrivacySnapshotVersion(userId)) !==
+          privacySnapshotVersion
+      ) {
         this.logger.log(`Export ${requestId} cancelled after data compilation.`);
+        await this.dataExportService.cancelExportForPrivacyChange(requestId);
         return;
       }
 
@@ -73,17 +89,40 @@ export class ExportProcessor extends WorkerHost {
 
       const result = await this.generateChunkedZip(requestId, data);
 
-      await this.exportRepository.update(requestId, {
-        status: 'READY',
-        isChunked: true,
-        chunkCount: result.chunkCount,
-        totalSize: result.totalSize.toString(),
-        combinedChecksum: result.combinedChecksum,
-      });
+      if (
+        (await this.dataExportService.isExportCancelled(requestId)) ||
+        (await this.dataExportService.getExportPrivacySnapshotVersion(userId)) !==
+          privacySnapshotVersion
+      ) {
+        await this.dataExportService.cancelExportForPrivacyChange(requestId);
+        return;
+      }
 
-      // Stamp completedAt
       const now = new Date();
-      await this.exportRepository.update(requestId, { completedAt: now });
+      const published = await this.exportRepository.update(
+        { id: requestId, status: 'PROCESSING', privacySnapshotVersion },
+        {
+          status: 'READY',
+          completedAt: now,
+          isChunked: true,
+          chunkCount: result.chunkCount,
+          totalSize: result.totalSize.toString(),
+          combinedChecksum: result.combinedChecksum,
+        },
+      );
+      if ((published.affected ?? 0) === 0) {
+        await this.dataExportService.cancelExportForPrivacyChange(requestId);
+        return;
+      }
+
+      if (
+        (await this.dataExportService.isExportCancelled(requestId)) ||
+        (await this.dataExportService.getExportPrivacySnapshotVersion(userId)) !==
+          privacySnapshotVersion
+      ) {
+        await this.dataExportService.cancelExportForPrivacyChange(requestId);
+        return;
+      }
 
       const user = await this.userRepository.findOneBy({
         id: parseInt(userId),
