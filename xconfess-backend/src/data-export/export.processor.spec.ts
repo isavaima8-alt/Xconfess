@@ -35,6 +35,7 @@ describe('ExportProcessor', () => {
       markExportProcessing: jest.fn().mockResolvedValue(true),
       isExportCancelled: jest.fn(async () => false), // Issue #106: cancellation check
     };
+    exportRepo.update.mockResolvedValue({ affected: 1 });
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -95,6 +96,7 @@ describe('ExportProcessor', () => {
       expect(dataExportService.compileUserData).toHaveBeenCalled();
       expect(dataExportService.markExportProcessing).toHaveBeenCalledWith(
         'req-1',
+        'snapshot-v1',
       );
       expect(exportRepo.update).toHaveBeenCalledWith(
         { id: 'req-1', status: 'PROCESSING' },
@@ -120,6 +122,7 @@ describe('ExportProcessor', () => {
 
       expect(dataExportService.markExportProcessing).toHaveBeenCalledWith(
         'req-1',
+        'snapshot-v1',
       );
       expect(dataExportService.markExportFailed).toHaveBeenCalledWith(
         'req-1',
@@ -140,7 +143,7 @@ describe('ExportProcessor', () => {
       await expect(processor.process(mockJob)).rejects.toThrow('timeout');
 
       expect(exportRepo.update).not.toHaveBeenCalledWith(
-        'req-fail',
+        expect.objectContaining({ id: 'req-fail' }),
         expect.objectContaining({ status: 'READY' }),
       );
       expect(dataExportService.markExportFailed).toHaveBeenCalledWith(

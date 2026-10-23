@@ -33,6 +33,10 @@ export class ExportRequest {
   @Column({ type: 'varchar', length: 64, nullable: true })
   combinedChecksum!: string; // SHA-256 of the concatenated chunks
 
+  /** Hash of privacy-relevant user state when this snapshot was generated. */
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  privacySnapshotVersion!: string | null;
+
   @CreateDateColumn()
   createdAt!: Date;
 

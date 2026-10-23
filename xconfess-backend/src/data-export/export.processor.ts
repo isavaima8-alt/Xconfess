@@ -55,6 +55,13 @@ export class ExportProcessor extends WorkerHost {
         return;
       }
 
+      const privacySnapshotVersion =
+        await this.dataExportService.getExportPrivacySnapshotVersion(userId);
+      if (!privacySnapshotVersion) {
+        await this.dataExportService.cancelExportForPrivacyChange(requestId);
+        return;
+      }
+
       // Stamp processingAt and flip status to PROCESSING
       const ownsProcessingLease =
         await this.dataExportService.markExportProcessing(requestId);
@@ -69,8 +76,13 @@ export class ExportProcessor extends WorkerHost {
       const data = await this.dataExportService.compileUserData(userId);
 
       // Issue #106: second cancellation checkpoint — after compilation, before writes
-      if (await this.dataExportService.isExportCancelled(requestId)) {
+      if (
+        (await this.dataExportService.isExportCancelled(requestId)) ||
+        (await this.dataExportService.getExportPrivacySnapshotVersion(userId)) !==
+          privacySnapshotVersion
+      ) {
         this.logger.log(`Export ${requestId} cancelled after data compilation.`);
+        await this.dataExportService.cancelExportForPrivacyChange(requestId);
         return;
       }
 

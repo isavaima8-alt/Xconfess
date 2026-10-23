@@ -34,6 +34,7 @@ import { ErrorCode } from '../common/errors/error-codes';
 import { AnalyticsEventService } from '../analytics/analytics-event.service';
 import { Cache } from 'cache-manager';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { DataExportService } from '../data-export/data-export.service';
 
 /**
  * Cache namespaces that hold personalization-derived discovery results for a
@@ -56,6 +57,7 @@ export class UserService {
     @Inject(forwardRef(() => EmailService))
     private emailService: EmailService,
     private readonly configService: ConfigService,
+    private readonly dataExportService: DataExportService,
     @Optional()
     private readonly analyticsEventService?: AnalyticsEventService,
     @Optional()
@@ -277,7 +279,12 @@ export class UserService {
     if (!user) throw new NotFoundException('User not found');
 
     user.is_active = false;
-    return this.userRepository.save(user);
+    const savedUser = await this.userRepository.save(user);
+    await this.dataExportService.cancelExportsForUser(
+      String(userId),
+      'account_deactivated',
+    );
+    return savedUser;
   }
 
   async reactivateAccount(userId: number): Promise<User> {
@@ -285,12 +292,21 @@ export class UserService {
     if (!user) throw new NotFoundException('User not found');
 
     user.is_active = true;
-    return this.userRepository.save(user);
+    const savedUser = await this.userRepository.save(user);
+    await this.dataExportService.cancelExportsForUser(
+      String(userId),
+      'account_reactivated',
+    );
+    return savedUser;
   }
 
   async deleteAccount(userId: number): Promise<void> {
     const user = await this.findById(userId);
     if (!user) throw new NotFoundException('User not found');
+    await this.dataExportService.cancelExportsForUser(
+      String(userId),
+      'account_deleted',
+    );
     await this.userRepository.remove(user);
   }
 
@@ -734,6 +750,10 @@ export class UserService {
     };
 
     await this.userRepository.save(user);
+    await this.dataExportService.cancelExportsForUser(
+      String(userId),
+      'privacy_settings_changed',
+    );
 
     await this.enforcePrivacyPolicies(user);
 
@@ -967,6 +987,12 @@ export class UserService {
     }
 
     await this.userRepository.save(user);
+    if (dto.privacySettings || dto.personalizationEnabled !== undefined) {
+      await this.dataExportService.cancelExportsForUser(
+        String(userId),
+        'privacy_settings_changed',
+      );
+    }
     await this.enforcePrivacyPolicies(user);
     return user;
   }
@@ -1009,6 +1035,11 @@ export class UserService {
         'Failed to update personalization preference',
       );
     }
+
+    await this.dataExportService.cancelExportsForUser(
+      String(userId),
+      'privacy_settings_changed',
+    );
 
     await this.invalidatePersonalizationCache(userId);
 

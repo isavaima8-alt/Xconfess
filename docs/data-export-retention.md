@@ -18,7 +18,14 @@ Reference for export job lifecycle, download token behaviour, and retention defa
 | `PROCESSING` | Job picked up, file being generated |
 | `READY` | File available for download |
 | `FAILED` | Job failed (retryable) |
+| `CANCELLED` | Owner canceled or account/privacy state changed; artifact and chunks are purged |
 | `EXPIRED` | Download window elapsed |
+
+## Snapshot Consistency
+
+The worker records a hash of the owner's privacy state when processing starts, checks it after compilation and chunk creation, and conditionally publishes only while the request is still `PROCESSING`. Account deletion, activation changes, and privacy-settings updates synchronously cancel that user's pending, processing, failed, and ready exports. Download-link issuance and every file/chunk delivery also verify current ownership, user existence, consent, and the stored snapshot hash. Missing users are rejected as not found, consent withdrawal as forbidden, and stale snapshots as gone; the associated export artifacts are purged.
+
+Apply migration `AddExportPrivacySnapshotVersion20261021000001` before deploying this behavior. Exports created before the migration have no fingerprint and will be invalidated on their next link or download attempt.
 
 ## Download Token Rules
 

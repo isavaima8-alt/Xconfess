@@ -12,6 +12,7 @@ import { UserAnonymousUser } from './entities/user-anonymous-link.entity';
 import { ConfessionModule } from '../confession/confession.module';
 import { AuthModule } from '../auth/auth.module';
 import { FeatureFlagsModule } from '../feature-flags/feature-flags.module';
+import { DataExportModule } from '../data-export/data-export.module';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { FeatureFlagsModule } from '../feature-flags/feature-flags.module';
     forwardRef(() => AuthModule),
     forwardRef(() => EmailModule),
     forwardRef(() => ConfessionModule),
+    DataExportModule,
   ],
   providers: [UserService, AnonymousUserService],
   controllers: [UserPublicController, UserController],
