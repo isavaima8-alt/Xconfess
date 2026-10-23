@@ -4,6 +4,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { User } from './entities/user.entity';
 import {
+  BadRequestException,
   InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
@@ -661,6 +662,51 @@ describe('UserService', () => {
 
       expect(result).toEqual(dto);
       expect(mockRepository.save).toHaveBeenCalled();
+    });
+
+    describe('updateSettings', () => {
+      it('rejects credential or identity field mutation through the generic settings route', async () => {
+        await expect(
+          service.updateSettings(1, { password: 'attacker-controlled' }),
+        ).rejects.toThrow(BadRequestException);
+        await expect(
+          service.updateSettings(1, { role: 'admin' }),
+        ).rejects.toThrow(BadRequestException);
+        expect(mockRepository.save).not.toHaveBeenCalled();
+      });
+
+      it('continues to save supported preference properties', async () => {
+        await service.updateSettings(1, {
+          notificationPreferences: { email: false },
+        });
+        expect(mockRepository.save).toHaveBeenCalledWith(mockUser);
+      });
+
+      describe('regenerateRecoveryCodes', () => {
+        it('returns one-time codes and persists only their encrypted verifiers', async () => {
+          const user = { ...mockUser, totpEnabled: true };
+          mockRepository.findOne.mockResolvedValue(user);
+
+          const codes = await service.regenerateRecoveryCodes(1);
+          const savedUser = mockRepository.save.mock.calls[0][0] as User;
+
+          expect(codes).toHaveLength(10);
+          expect(savedUser.recoveryCodesEncrypted).toBeTruthy();
+          expect(savedUser.recoveryCodesEncrypted).not.toContain(codes[0]);
+        });
+
+        it('rejects recovery-code regeneration when authenticator TOTP is disabled', async () => {
+          mockRepository.findOne.mockResolvedValue({
+            ...mockUser,
+            totpEnabled: false,
+          });
+
+          await expect(service.regenerateRecoveryCodes(1)).rejects.toThrow(
+            BadRequestException,
+          );
+          expect(mockRepository.save).not.toHaveBeenCalled();
+        });
+      });
     });
   });
 });

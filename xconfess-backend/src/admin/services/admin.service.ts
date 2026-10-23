@@ -3,10 +3,13 @@
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  ConflictException,
+  GoneException,
   Logger,
 } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
-import { EntityManager, In, Repository, LessThan } from "typeorm";
+import { EntityManager, In, Repository } from "typeorm";
+import { Cron, CronExpression } from "@nestjs/schedule";
 import { Report, ReportStatus, ReportType } from "../entities/report.entity";
 import { AnonymousConfession } from "../../confession/entities/confession.entity";
 import { User, UserRole } from "../../user/entities/user.entity";
@@ -23,6 +26,11 @@ import { AuditLogService } from "../../audit-log/audit-log.service";
 import { JobManagementService } from "../../notifications/services/job-management.service";
 import { LockoutService } from "../../auth/lockout.service";
 import { SessionService } from "../../auth/session.service";
+import {
+  AdminActionApproval,
+  AdminActionApprovalStatus,
+  AdminCriticalAction,
+} from "../entities/admin-action-approval.entity";
 import {
   CursorPaginatedResponseDto,
   PAGINATION,
@@ -83,6 +91,8 @@ export class AdminService {
     private readonly jobManagementService: JobManagementService,
     private readonly lockoutService: LockoutService,
     private readonly sessionService: SessionService,
+    @InjectRepository(AdminActionApproval)
+    private readonly actionApprovalRepository: Repository<AdminActionApproval>,
   ) {}
 
   private get aesKey(): string {
@@ -109,7 +119,7 @@ export class AdminService {
       .leftJoinAndSelect("report.confession", "confession")
       .leftJoinAndSelect("report.reporter", "reporter")
       .leftJoinAndSelect("report.resolver", "resolver")
-      .orderBy: "report.createdAt", "DESC")
+      .orderBy("report.createdAt", "DESC")
       .take(limit)
       .skip(offset);
 
@@ -350,36 +360,285 @@ export class AdminService {
   }
 
   // Confessions
-  async deleteConfession(
-    id: string,
+  async requestAdminActionApproval(
+    action: AdminCriticalAction,
+    targetId: string,
+    reason: string,
     adminId: number,
-    reason: string | null,
     request?: Request,
-  ): Promise<void> {
-    await this.runInModerationTransaction(async (manager) => {
+  ): Promise<AdminActionApproval> {
+    if (action !== AdminCriticalAction.CONFESSION_DELETE) {
+      throw new BadRequestException("Unsupported high-impact admin action");
+    }
+    const normalizedReason = reason?.trim();
+    if (!normalizedReason || normalizedReason.length < 3) {
+      throw new BadRequestException("A reason of at least 3 characters is required");
+    }
+
+    return this.actionApprovalRepository.manager.transaction(async (manager) => {
+      const approvalRepo = manager.getRepository(AdminActionApproval);
       const confessionRepo = manager.getRepository(AnonymousConfession);
       const confession = await confessionRepo.findOne({
-        where: { id },
+        where: { id: targetId },
       });
 
       if (!confession) {
         throw new NotFoundException("Confession not found");
       }
+      if (confession.isDeleted) {
+        throw new ConflictException("Confession is already deleted");
+      }
 
-      confession.isDeleted = true;
-      await confessionRepo.save(confession);
+      const requestedAt = new Date();
+      const expiresAt = new Date(
+        requestedAt.getTime() + this.approvalTtlMinutes * 60_000,
+      );
+      const approval = await approvalRepo.save(
+        approvalRepo.create({
+          action,
+          targetId,
+          requestedById: adminId,
+          approvedById: null,
+          status: AdminActionApprovalStatus.PENDING,
+          reason: normalizedReason,
+          cancellationReason: null,
+          expiresAt,
+          approvedAt: null,
+          executedAt: null,
+          cancelledAt: null,
+          expiredAt: null,
+        }),
+      );
 
       await this.moderationService.logAction(
         adminId,
-        AuditActionType.CONFESSION_DELETED,
-        "confession",
-        id,
-        { reason },
-        reason,
+        AuditActionType.BULK_ACTION,
+        "admin_action_approval",
+        approval.id,
+        {
+          event: "requested",
+          action,
+          targetId,
+          expiresAt: expiresAt.toISOString(),
+        },
+        normalizedReason,
         request,
         manager,
       );
+      return approval;
     });
+  }
+
+  async findPendingAdminActionApprovals(): Promise<AdminActionApproval[]> {
+    return this.actionApprovalRepository.find({
+      where: { status: AdminActionApprovalStatus.PENDING },
+      order: { requestedAt: "ASC" },
+      take: 100,
+    });
+  }
+
+  async approveAdminAction(
+    approvalId: string,
+    adminId: number,
+    request?: Request,
+  ): Promise<AdminActionApproval> {
+    const outcome = await this.actionApprovalRepository.manager.transaction(
+      async (manager) => {
+        const approvalRepo = manager.getRepository(AdminActionApproval);
+        const approval = await approvalRepo.findOne({
+          where: { id: approvalId },
+          lock: { mode: "pessimistic_write" },
+        });
+        if (!approval) {
+          throw new NotFoundException("Action approval not found");
+        }
+        if (approval.status !== AdminActionApprovalStatus.PENDING) {
+          throw new ConflictException("Action approval is no longer pending");
+        }
+        if (approval.requestedById === adminId) {
+          throw new ForbiddenException(
+            "A different administrator must approve this action",
+          );
+        }
+
+        const now = new Date();
+        if (approval.expiresAt.getTime() <= now.getTime()) {
+          approval.status = AdminActionApprovalStatus.EXPIRED;
+          approval.expiredAt = now;
+          await approvalRepo.save(approval);
+          await this.logApprovalLifecycle(
+            manager,
+            approval,
+            null,
+            "expired",
+          );
+          return { approval, expired: true };
+        }
+
+        if (approval.action !== AdminCriticalAction.CONFESSION_DELETE) {
+          throw new ConflictException("Unsupported high-impact admin action");
+        }
+        const confessionRepo = manager.getRepository(AnonymousConfession);
+        const confession = await confessionRepo.findOne({
+          where: { id: approval.targetId },
+          lock: { mode: "pessimistic_write" },
+        });
+        if (!confession) {
+          throw new NotFoundException("Confession not found");
+        }
+        if (confession.isDeleted) {
+          throw new ConflictException("Confession is already deleted");
+        }
+
+        approval.approvedById = adminId;
+        approval.approvedAt = now;
+        approval.executedAt = now;
+        approval.status = AdminActionApprovalStatus.EXECUTED;
+        confession.isDeleted = true;
+        await confessionRepo.save(confession);
+        await approvalRepo.save(approval);
+        await this.logApprovalLifecycle(
+          manager,
+          approval,
+          adminId,
+          "approved",
+          request,
+        );
+        await this.logApprovalLifecycle(
+          manager,
+          approval,
+          adminId,
+          "executed",
+          request,
+        );
+        return { approval, expired: false };
+      },
+    );
+
+    if (outcome.expired) {
+      throw new GoneException("Action approval has expired");
+    }
+    return outcome.approval;
+  }
+
+  async cancelAdminActionApproval(
+    approvalId: string,
+    adminId: number,
+    reason?: string,
+    request?: Request,
+  ): Promise<AdminActionApproval> {
+    const outcome = await this.actionApprovalRepository.manager.transaction(
+      async (manager) => {
+        const approvalRepo = manager.getRepository(AdminActionApproval);
+        const approval = await approvalRepo.findOne({
+          where: { id: approvalId },
+          lock: { mode: "pessimistic_write" },
+        });
+        if (!approval) {
+          throw new NotFoundException("Action approval not found");
+        }
+        if (approval.requestedById !== adminId) {
+          throw new ForbiddenException(
+            "Only the requesting administrator can cancel this action",
+          );
+        }
+        if (approval.status !== AdminActionApprovalStatus.PENDING) {
+          throw new ConflictException("Action approval is no longer pending");
+        }
+
+        const now = new Date();
+        if (approval.expiresAt.getTime() <= now.getTime()) {
+          approval.status = AdminActionApprovalStatus.EXPIRED;
+          approval.expiredAt = now;
+          await approvalRepo.save(approval);
+          await this.logApprovalLifecycle(
+            manager,
+            approval,
+            null,
+            "expired",
+          );
+          return { approval, expired: true };
+        }
+
+        approval.status = AdminActionApprovalStatus.CANCELLED;
+        approval.cancelledAt = now;
+        approval.cancellationReason = reason?.trim() || null;
+        await approvalRepo.save(approval);
+        await this.logApprovalLifecycle(
+          manager,
+          approval,
+          adminId,
+          "cancelled",
+          request,
+          approval.cancellationReason,
+        );
+        return { approval, expired: false };
+      },
+    );
+
+    if (outcome.expired) {
+      throw new GoneException("Action approval has expired");
+    }
+    return outcome.approval;
+  }
+
+  @Cron(CronExpression.EVERY_MINUTE)
+  async expirePendingAdminActionApprovals(): Promise<number> {
+    return this.actionApprovalRepository.manager.transaction(async (manager) => {
+      const approvalRepo = manager.getRepository(AdminActionApproval);
+      const expiredApprovals = await approvalRepo
+        .createQueryBuilder("approval")
+        .where("approval.status = :status", {
+          status: AdminActionApprovalStatus.PENDING,
+        })
+        .andWhere("approval.expires_at <= :now", { now: new Date() })
+        .orderBy("approval.expires_at", "ASC")
+        .setLock("pessimistic_write")
+        .setOnLocked("skip_locked")
+        .take(100)
+        .getMany();
+
+      for (const approval of expiredApprovals) {
+        approval.status = AdminActionApprovalStatus.EXPIRED;
+        approval.expiredAt = new Date();
+        await approvalRepo.save(approval);
+        await this.logApprovalLifecycle(manager, approval, null, "expired");
+      }
+      return expiredApprovals.length;
+    });
+  }
+
+  private get approvalTtlMinutes(): number {
+    return (
+      this.configService.get<number>("ADMIN_ACTION_APPROVAL_TTL_MINUTES") ?? 30
+    );
+  }
+
+  private async logApprovalLifecycle(
+    manager: EntityManager,
+    approval: AdminActionApproval,
+    actorId: number | null,
+    event: "approved" | "executed" | "cancelled" | "expired",
+    request?: Request,
+    cancellationReason?: string | null,
+  ): Promise<void> {
+    await this.moderationService.logAction(
+      actorId,
+      AuditActionType.BULK_ACTION,
+      "admin_action_approval",
+      approval.id,
+      {
+        event,
+        action: approval.action,
+        targetId: approval.targetId,
+        requestedById: approval.requestedById,
+        approvedById: approval.approvedById,
+        ...(cancellationReason ? { cancellationReason } : {}),
+      },
+      approval.reason,
+      request,
+      manager,
+    );
   }
 
   async hideConfession(

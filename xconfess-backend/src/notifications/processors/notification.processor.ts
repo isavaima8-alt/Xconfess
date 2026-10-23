@@ -4,7 +4,7 @@ import { Job, Queue } from 'bullmq';
 import { EmailNotificationService } from '../services/email-notification.service';
 import { NotificationType } from '../entities/notification.entity';
 import { AppLogger } from '../../logger/logger.service';
-import { CorrelationContext } from '../../common/correlation/correlation.context';
+import { QUEUE_WORKER_CONCURRENCY } from '../../config/queue-concurrency.config';
 
 export const NOTIFICATION_QUEUE = 'notifications';
 export const NOTIFICATION_DLQ = 'notifications-dlq';
@@ -27,7 +27,9 @@ export interface NotificationJobData {
   };
 }
 
-@Processor(NOTIFICATION_QUEUE)
+@Processor(NOTIFICATION_QUEUE, {
+  concurrency: QUEUE_WORKER_CONCURRENCY.notifications,
+})
 export class NotificationProcessor extends WorkerHost {
   private readonly logger = new Logger(NotificationProcessor.name);
 
@@ -42,38 +44,30 @@ export class NotificationProcessor extends WorkerHost {
 
   // ------------------------------------------------------------------ process
   async process(job: Job<NotificationJobData>): Promise<void> {
-    const correlationId =
-      job.data.correlationId ?? CorrelationContext.getOrGenerateRequestId();
-    return CorrelationContext.run(correlationId, () =>
-      this.processNotification(job),
+    if (job.name !== 'send-notification') {
+      throw new Error(`Unsupported notification job name: ${job.name}`);
+    }
+
+    this.logger.log(
+      `Processing notification job ${job.id} (attempt ${job.attemptsMade + 1})` +
+        ` → userId: ${job.data.userId}`,
     );
-  }
 
-  private async processNotification(
-    job: Job<NotificationJobData>,
-  ): Promise<void> {
-    if (job.name === 'send-notification') {
-      this.logger.log(
-        `Processing notification job ${job.id} (attempt ${job.attemptsMade + 1})` +
-          ` → userId: ${job.data.userId}`,
-      );
+    this.appLogger.incrementCounter('notification_queue_processing_total', 1, {
+      queue: NOTIFICATION_QUEUE,
+      jobName: job.name,
+    });
 
-      this.appLogger.incrementCounter('notification_queue_processing_total', 1, {
+    const startedAt = Date.now();
+    await this.emailNotificationService.sendEmail(job.data);
+    this.appLogger.observeTimer(
+      'notification_queue_processing_duration_ms',
+      Date.now() - startedAt,
+      {
         queue: NOTIFICATION_QUEUE,
         jobName: job.name,
-      });
-
-      const startedAt = Date.now();
-      await this.emailNotificationService.sendEmail(job.data);
-      this.appLogger.observeTimer(
-        'notification_queue_processing_duration_ms',
-        Date.now() - startedAt,
-        {
-          queue: NOTIFICATION_QUEUE,
-          jobName: job.name,
-        },
-      );
-    }
+      },
+    );
   }
 
   // --------------------------------------------------------------- on:failed

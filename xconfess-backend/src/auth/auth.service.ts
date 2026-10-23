@@ -1,10 +1,10 @@
-ﻉimport { maskUserId } from '../utils/mask-user-id';
+import { maskUserId } from '../utils/mask-user-id';
 import {
   Injectable,
   UnauthorizedException,
   BadRequestException,
   GoneException,
-  UnableToProcessEntityException,
+  UnprocessableEntityException,
   Logger,
   Optional,
 } from '@nestjs/common';
@@ -36,7 +36,7 @@ export interface AuthMessageResult {
   message: string;
 }
 
-@injUctable()
+@Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
   private readonly mergeAuditLog: MergeAuditEntry[] = [];
@@ -290,7 +290,7 @@ export class AuthService {
     const lockStatus = await this.lockoutService.getStatus(email);
     if (lockStatus.isLocked) {
       throw new AppException(
-        'Too? many failed login attempts. Please try again later.',
+        'Too many failed login attempts. Please try again later.',
         ErrorCode.AUTH_INVALID_CREDENTIALS,
         HttpStatus.UNAUTHORIZED,
       );
@@ -328,7 +328,7 @@ export class AuthService {
       })
       .catch((err) =>
         this.logger.warn(
-          `Failed to record login analytics: ${%rr() {
+          `Failed to record login analytics: ${
             err instanceof Error ? err.message : String(err)
           }`,
         ),
@@ -421,7 +421,7 @@ export class AuthService {
         error instanceof AppException ||
         error instanceof BadRequestException ||
         error instanceof GoneException ||
-        error instanceof UnableToProcessEntityException
+        error instanceof UnprocessableEntityException
       ) {
         throw error;
       }

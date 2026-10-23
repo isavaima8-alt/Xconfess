@@ -36,6 +36,7 @@ export default function AdminLayout({
   const navItems = useMemo(
     () => [
       { href: "/admin/dashboard", label: "Dashboard" },
+      { href: "/admin/action-approvals", label: "Action approvals" },
       { href: "/admin/reports", label: "Reports" },
       { href: "/admin/users", label: "Users" },
       { href: "/admin/notifications", label: "Notifications" },

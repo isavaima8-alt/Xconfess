@@ -52,6 +52,10 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       ENABLE_BACKGROUND_JOBS: "true"
+      NOTIFICATION_WORKER_CONCURRENCY: "5"
+      EXPORT_WORKER_CONCURRENCY: "1"
+      CONFESSION_DRAFT_WORKER_CONCURRENCY: "1"
+      REDIS_QUEUE_WAIT_THRESHOLD_MS: "30000"
       TYPEORM_SYNCHRONIZE: "true"
       JWT_SECRET: local-development-jwt-secret
       APP_SECRET: local-development-app-secret

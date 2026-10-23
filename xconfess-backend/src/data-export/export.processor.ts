@@ -13,9 +13,11 @@ import { EmailService } from '../email/email.service';
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { EXPORT_QUEUE_NAME } from './data-export.constants';
-import { CorrelationContext } from '../common/correlation/correlation.context';
+import { QUEUE_WORKER_CONCURRENCY } from '../config/queue-concurrency.config';
 
-@Processor(EXPORT_QUEUE_NAME)
+@Processor(EXPORT_QUEUE_NAME, {
+  concurrency: QUEUE_WORKER_CONCURRENCY[EXPORT_QUEUE_NAME],
+})
 export class ExportProcessor extends WorkerHost {
   private readonly logger = new Logger(ExportProcessor.name);
   private readonly CHUNK_SIZE_LIMIT = 10 * 1024 * 1024; // 10MB per chunk
@@ -34,18 +36,10 @@ export class ExportProcessor extends WorkerHost {
     super();
   }
 
-  async process(
-    job: Job<{ userId: string; requestId: string; correlationId?: string }>,
-  ): Promise<void> {
-    const correlationId =
-      job.data.correlationId ?? CorrelationContext.getOrGenerateRequestId();
-    return CorrelationContext.run(correlationId, () => this.processExport(job));
-  }
-
-  private async processExport(
-    job: Job<{ userId: string; requestId: string; correlationId?: string }>,
-  ): Promise<void> {
-    if (job.name !== 'process-export') return;
+  async process(job: Job<{ userId: string; requestId: string }>) {
+    if (job.name !== 'process-export') {
+      throw new Error(`Unsupported export job name: ${job.name}`);
+    }
     const { userId, requestId } = job.data;
 
     try {

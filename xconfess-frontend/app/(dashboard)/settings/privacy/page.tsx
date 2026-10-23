@@ -1,9 +1,32 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from 'react';
-import { Shield, Eye, EyeOff, MessageSquare, Database, Save, Sun, Moon, Laptop, Lock, Globe, Bell, BellOff } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
+import {
+  ArrowRight,
+  Bell,
+  BellOff,
+  Database,
+  Eye,
+  EyeOff,
+  ExternalLink,
+  Globe,
+  Info,
+  Laptop,
+  Layers,
+  Lock,
+  MessageSquare,
+  Moon,
+  RotateCcw,
+  Save,
+  Shield,
+  Sun,
+} from 'lucide-react';
 import { useGlobalToast } from '@/app/components/common/Toast';
+import StepUpModal from '@/app/components/admin/StepUpModal';
+import { useStepUp } from '@/app/hooks/useStepUp';
 import { normalizeApiError } from '@/app/lib/api/errors';
+import { stepUpHeader } from '@/app/lib/api/stepUp';
 import { useTheme } from '@/app/lib/hooks/useTheme';
 import {
   mergePrivacySettingsAfterConflict,
@@ -146,6 +169,7 @@ export default function PrivacySettingsPage() {
   const savedSettingsRef = useRef<PrivacySettings | null>(null);
   const saveInFlightRef = useRef(false);
   const toast = useGlobalToast();
+  const stepUp = useStepUp();
 
   const loadSettings = useCallback(async () => {
     setLoading(true);
@@ -200,7 +224,7 @@ export default function PrivacySettingsPage() {
     }
   };
 
-  const handleSave = async () => {
+  const persistSettings = async (stepUpToken: string) => {
     if (!settings || saveInFlightRef.current) return;
 
     saveInFlightRef.current = true;
@@ -208,7 +232,10 @@ export default function PrivacySettingsPage() {
     try {
       const response = await fetch('/api/users/privacy-settings', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...stepUpHeader(stepUpToken),
+        },
         credentials: 'include',
         body: JSON.stringify(settings),
       });
@@ -257,6 +284,13 @@ export default function PrivacySettingsPage() {
       saveInFlightRef.current = false;
       setSaving(false);
     }
+  };
+
+  const handleSave = () => {
+    if (!settings || saveInFlightRef.current) return;
+    stepUp.requestStepUp((token) => {
+      void persistSettings(token);
+    });
   };
 
   // Calculate effective security posture summary
@@ -538,6 +572,13 @@ export default function PrivacySettingsPage() {
           </p>
         )}
       </div>
+      <StepUpModal
+        isOpen={stepUp.isModalOpen}
+        onVerify={stepUp.verify}
+        onCancel={stepUp.cancel}
+        error={stepUp.error}
+        isVerifying={stepUp.isVerifying}
+      />
     </div>
   );
 }

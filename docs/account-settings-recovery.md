@@ -114,12 +114,52 @@ See `xconfess-frontend/.env.example`.
 - Save requests are made with `credentials: "include"` so the normal
   cookie-based session applies; the recovery layer does not manage tokens.
 
+## Reauthentication risk tiers
+
+Authentication and authorization are enforced by the backend routes; the
+frontend prompt is only the accessible way to obtain and attach a proof.
+Session possession by itself is not sufficient to modify privacy, recovery,
+credential, or account-identity data.
+
+| Tier | Examples | Required authorization |
+|------|----------|------------------------|
+| Routine settings | Notification preferences and ordinary session actions | Authenticated session |
+| Sensitive privacy | Profile discoverability, reply/reaction visibility, data-processing consent | Authenticated session plus a fresh step-up proof |
+| Account control | Password changes, TOTP disablement, recovery-code replacement/revocation, email change/rollback | Authenticated session plus a fresh step-up proof; email activation also requires the existing out-of-band email verification |
+| Account recovery | Forgot-password request and password reset | Generic reset-request response; reset requires possession of the one-time email token and does not rely on an active session |
+
+Step-up proofs are issued by `POST /auth/step-up` after verifying exactly one
+password, TOTP token, or single-use recovery code. They are user-bound and
+short-lived (300 seconds by default); clients attach the proof as
+`x-step-up-token`. Missing, expired, invalid, or wrong-user proofs are rejected
+with stable `AUTH_STEP_UP_*` codes and no sensitive change is applied. The
+generic settings endpoint is also step-up protected and only accepts privacy
+and notification preference fields; it cannot be used to mutate credential or
+identity columns.
+
+Operational setting:
+
+| Variable | Default | Allowed range | Purpose |
+|----------|---------|---------------|---------|
+| `STEP_UP_PROOF_TTL_SECONDS` | `300` | `60`-`900` | Lifetime of a verified step-up proof |
+
+The privacy screens preserve unsaved changes while the user completes
+reauthentication. The prompt is keyboard-accessible, traps focus, exposes
+verification errors, and offers password, authenticator, and recovery-code
+options. Canceling it does not submit the pending settings.
+
 ## Validation
 
 Run the frontend suites that cover this behavior:
 
 ```bash
 npm run frontend:test
+```
+
+Run the backend suite for ownership, step-up, and account-setting enforcement:
+
+```bash
+npm run backend:test
 ```
 
 Relevant specs:

@@ -397,6 +397,31 @@ export class UserService {
     }
   }
 
+  async regenerateRecoveryCodes(userId: number): Promise<string[]> {
+    const user = await this.findById(userId);
+    if (!user) throw new NotFoundException('User not found');
+    if (!user.totpEnabled) {
+      throw new BadRequestException(
+        'Authenticator-based two-factor authentication must be enabled first',
+      );
+    }
+
+    const codes = this.generateRecoveryCodes();
+    const verifiers = Array.from(
+      new Set(codes.map((code) => this.hashRecoveryCode(code))),
+    );
+    const enc = CryptoUtil.encrypt(JSON.stringify(verifiers));
+    user.recoveryCodesEncrypted = enc.encrypted;
+    user.recoveryCodesIv = enc.iv;
+    user.recoveryCodesTag = enc.tag;
+    try {
+      await this.userRepository.save(user);
+    } catch {
+      throw new InternalServerErrorException('Failed to regenerate recovery codes');
+    }
+    return codes;
+  }
+
   async setRecoveryCodes(userId: number, encrypted: string, iv: string, tag: string): Promise<void> {
     const user = await this.findById(userId);
     if (!user) throw new NotFoundException('User not found');
@@ -916,6 +941,14 @@ export class UserService {
     userId: number,
     dto: Record<string, any>,
   ): Promise<User> {
+    const allowedKeys = new Set(['privacySettings', 'notificationPreferences']);
+    const unsupportedKeys = Object.keys(dto).filter(
+      (key) => !allowedKeys.has(key),
+    );
+    if (unsupportedKeys.length > 0) {
+      throw new BadRequestException('Unsupported account setting');
+    }
+
     const user = await this.findById(userId);
     if (!user) throw new NotFoundException('User not found');
 
@@ -931,16 +964,6 @@ export class UserService {
         ...user.notificationPreferences,
         ...dto.notificationPreferences,
       };
-    }
-
-    for (const key of Object.keys(dto)) {
-      if (
-        key !== 'privacySettings' &&
-        key !== 'notificationPreferences' &&
-        key in user
-      ) {
-        (user as any)[key] = dto[key];
-      }
     }
 
     await this.userRepository.save(user);

@@ -12,6 +12,9 @@ import {
   Shield,
 } from 'lucide-react';
 import { useGlobalToast } from '@/app/components/common/Toast';
+import StepUpModal from '@/app/components/admin/StepUpModal';
+import { useStepUp } from '@/app/hooks/useStepUp';
+import { stepUpHeader } from '@/app/lib/api/stepUp';
 import {
   ACCOUNT_SETTINGS_STEP_IDS,
   AccountSettingsStepId,
@@ -68,10 +71,13 @@ const privacyStep: SettingsStepDefinition<PrivacyValues> = {
       credentials: 'include',
     });
   },
-  async persist(values) {
+  async persist(values, stepUpToken) {
     return requestStepJson<PrivacyValues>('/api/users/privacy-settings', {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...stepUpHeader(stepUpToken),
+      },
       credentials: 'include',
       body: JSON.stringify(values),
     });
@@ -301,6 +307,7 @@ function StepActions({
 export default function AccountSettingsPage() {
   const toast = useGlobalToast();
   const flow = useAccountSettingsFlow(STEP_DEFINITIONS);
+  const stepUp = useStepUp();
   const { steps, currentStepId } = flow;
 
   const privacyRecord = steps.privacy;
@@ -321,28 +328,53 @@ export default function AccountSettingsPage() {
 
   const handleSave = useCallback(
     async (id: PersistedStepId, label: string) => {
-      handleOutcome(await flow.saveStep(id), label);
+      const save = async (token?: string) =>
+        handleOutcome(await flow.saveStep(id, token), label);
+      if (id === 'privacy') {
+        stepUp.requestStepUp((token) => {
+          void save(token);
+        });
+      } else {
+        await save();
+      }
     },
-    [flow, handleOutcome],
+    [flow, handleOutcome, stepUp.requestStepUp],
   );
 
   const handleRetry = useCallback(
     async (id: PersistedStepId, label: string) => {
-      handleOutcome(await flow.retryStep(id), label);
+      const retry = async (token?: string) =>
+        handleOutcome(await flow.retryStep(id, token), label);
+      if (id === 'privacy') {
+        stepUp.requestStepUp((token) => {
+          void retry(token);
+        });
+      } else {
+        await retry();
+      }
     },
-    [flow, handleOutcome],
+    [flow, handleOutcome, stepUp.requestStepUp],
   );
 
   const handleSaveAll = useCallback(async () => {
-    const result = await flow.savePendingSteps();
-    if (result.blocked?.outcome === 'failed') {
-      toast.error(result.blocked.message);
-    } else if (result.blocked?.outcome === 'session_expired') {
-      toast.error('Your session has expired. Sign in again, then check your session.');
-    } else if (result.saved.length > 0) {
-      toast.success('Pending settings saved');
+    const saveAll = async (token?: string) => {
+      const result = await flow.savePendingSteps(token);
+      if (result.blocked?.outcome === 'failed') {
+        toast.error(result.blocked.message);
+      } else if (result.blocked?.outcome === 'session_expired') {
+        toast.error('Your session has expired. Sign in again, then check your session.');
+      } else if (result.saved.length > 0) {
+        toast.success('Pending settings saved');
+      }
+    };
+    if (flow.pendingStepIds.includes('privacy')) {
+      stepUp.requestStepUp((token) => {
+        void saveAll(token);
+      });
+    } else {
+      await saveAll();
     }
-  }, [flow, toast]);
+  }, [flow, stepUp.requestStepUp, toast]);
 
   const handleResumeSession = useCallback(async () => {
     const alive = await flow.resumeSession();
@@ -571,6 +603,13 @@ export default function AccountSettingsPage() {
           </button>
         )}
       </nav>
+      <StepUpModal
+        isOpen={stepUp.isModalOpen}
+        onVerify={stepUp.verify}
+        onCancel={stepUp.cancel}
+        error={stepUp.error}
+        isVerifying={stepUp.isVerifying}
+      />
     </div>
   );
 }

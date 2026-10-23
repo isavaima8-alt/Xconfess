@@ -6,9 +6,18 @@ const mockToast = { success: jest.fn(), error: jest.fn(), info: jest.fn() };
 jest.mock('@/app/components/common/Toast', () => ({
   useGlobalToast: () => mockToast,
 }));
+jest.mock('@/app/lib/api/admin', () => ({
+  adminApi: {
+    requestStepUp: jest.fn().mockResolvedValue({
+      stepUpToken: 'fresh-step-up-proof',
+      expiresIn: 300,
+    }),
+  },
+}));
 
 import AccountSettingsPage from '@/app/(dashboard)/settings/account/page';
 import { SETTINGS_DRAFT_STORAGE_KEY } from '@/app/lib/settings/accountSettingsRecovery';
+import { adminApi } from '@/app/lib/api/admin';
 
 const serverPrivacy = {
   isDiscoverable: true,
@@ -118,6 +127,14 @@ async function renderFlow() {
   });
 }
 
+async function confirmStepUp(user: ReturnType<typeof userEvent.setup>) {
+  const passwordInput = screen.getByLabelText('Account password');
+  await user.click(passwordInput);
+  await user.type(passwordInput, 'Current!Pass1');
+  expect(passwordInput).toHaveValue('Current!Pass1');
+  await user.click(screen.getByRole('button', { name: 'Verify' }));
+}
+
 describe('AccountSettingsPage recovery flow', () => {
   it('persists each step explicitly, preserves input across back navigation, and finishes cleanly', async () => {
     const user = userEvent.setup();
@@ -166,12 +183,31 @@ describe('AccountSettingsPage recovery flow', () => {
     // Save privacy.
     await user.click(screen.getByRole('button', { name: 'Back' }));
     await user.click(screen.getByRole('button', { name: 'Save privacy' }));
+    expect(screen.getByRole('dialog', { name: 'Confirm your identity' })).toBeInTheDocument();
+    expect(global.fetch).not.toHaveBeenCalledWith(
+      '/api/users/privacy-settings',
+      expect.objectContaining({ method: 'PATCH' }),
+    );
+    await confirmStepUp(user);
     await waitFor(() => {
       expect(within(screen.getByTestId('step-rail-privacy')).getByText('Saved')).toBeInTheDocument();
     });
     expect(mockToast.success).toHaveBeenCalledWith('Privacy saved');
+    expect(adminApi.requestStepUp).toHaveBeenCalledWith({
+      password: 'Current!Pass1',
+    });
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/users/privacy-settings',
+      expect.objectContaining({
+        method: 'PATCH',
+        headers: expect.objectContaining({
+          'x-step-up-token': 'fresh-step-up-proof',
+        }),
+      }),
+    );
 
     // Review exposes per-step persistence state and only then allows finishing.
+    await user.click(screen.getByRole('button', { name: 'Next' }));
     await user.click(screen.getByRole('button', { name: 'Next' }));
     expect(within(screen.getByTestId('step-rail-review')).getByText('All saved')).toBeInTheDocument();
     expect(screen.getByTestId('review-privacy')).toHaveTextContent('Saved');
@@ -233,6 +269,7 @@ describe('AccountSettingsPage recovery flow', () => {
     await renderFlow();
     await user.click(screen.getByRole('switch', { name: 'Profile Discovery' }));
     await user.click(screen.getByRole('button', { name: 'Save privacy' }));
+    await confirmStepUp(user);
 
     await waitFor(() => {
       expect(
@@ -248,6 +285,7 @@ describe('AccountSettingsPage recovery flow', () => {
     expect(store.get(SETTINGS_DRAFT_STORAGE_KEY)).toContain('"isDiscoverable":false');
 
     await user.click(screen.getByRole('button', { name: 'Retry' }));
+    await confirmStepUp(user);
     await waitFor(() => {
       expect(within(screen.getByTestId('step-rail-privacy')).getByText('Saved')).toBeInTheDocument();
     });
@@ -273,6 +311,7 @@ describe('AccountSettingsPage recovery flow', () => {
     await renderFlow();
     await user.click(screen.getByRole('switch', { name: 'Profile Discovery' }));
     await user.click(screen.getByRole('button', { name: 'Save privacy' }));
+    await confirmStepUp(user);
 
     await waitFor(() => {
       expect(
@@ -311,6 +350,7 @@ describe('AccountSettingsPage recovery flow', () => {
     expect(screen.getByRole('button', { name: 'Save privacy' })).toBeEnabled();
 
     await user.click(screen.getByRole('button', { name: 'Save privacy' }));
+    await confirmStepUp(user);
     await waitFor(() => {
       expect(within(screen.getByTestId('step-rail-privacy')).getByText('Saved')).toBeInTheDocument();
     });
@@ -326,6 +366,7 @@ describe('AccountSettingsPage recovery flow', () => {
     await renderFlow();
     await user.click(screen.getByRole('switch', { name: 'Profile Discovery' }));
     await user.click(screen.getByRole('button', { name: 'Save privacy' }));
+    await confirmStepUp(user);
 
     await waitFor(() => {
       expect(
@@ -373,6 +414,7 @@ describe('AccountSettingsPage recovery flow', () => {
 
     const saveButton = screen.getByRole('button', { name: 'Save privacy' });
     await user.click(saveButton);
+    await confirmStepUp(user);
 
     expect(saveButton).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Saving...' })).toBeDisabled();

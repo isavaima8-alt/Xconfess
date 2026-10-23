@@ -54,6 +54,7 @@ DB_READ_HOST=
 DB_READ_PORT=
 TYPEORM_SYNCHRONIZE=false
 TYPEORM_MIGRATIONS_RUN=true
+ADMIN_ACTION_APPROVAL_TTL_MINUTES=30
 
 JWT_SECRET=generate-a-strong-32-plus-character-secret
 APP_SECRET=generate-a-strong-32-plus-character-secret
@@ -100,10 +101,18 @@ APP_SECRET=staging-strong-secret
 CONFESSION_ENCRYPTION_KEY=64-hex-characters
 TYPEORM_SYNCHRONIZE=false
 TYPEORM_MIGRATIONS_RUN=true
+ADMIN_ACTION_APPROVAL_TTL_MINUTES=30
 ENABLE_BACKGROUND_JOBS=true
 REDIS_HOST=staging-redis-host
 REDIS_PORT=6379
 ```
+
+Admin confession deletion now requires an independent second-admin approval.
+Deploy the backend migration before enabling the new API flow, leave
+`TYPEORM_SYNCHRONIZE=false`, and set `ADMIN_ACTION_APPROVAL_TTL_MINUTES` to an
+integer from 5 through 1440 (default 30). Pending requests are marked expired
+automatically by the backend scheduler; approval and cancellation endpoints
+also enforce expiry immediately.
 
 Required frontend variables:
 

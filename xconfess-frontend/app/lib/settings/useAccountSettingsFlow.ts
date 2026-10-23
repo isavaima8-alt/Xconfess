@@ -49,7 +49,7 @@ export interface SettingsStepDefinition<T extends Record<string, unknown>> {
   id: PersistedStepId;
   label: string;
   load(): Promise<T>;
-  persist(values: T): Promise<T>;
+  persist(values: T, stepUpToken?: string): Promise<T>;
 }
 
 /** Erased definition type accepted by the flow hook (method syntax keeps it bivariant). */
@@ -208,7 +208,7 @@ export function useAccountSettingsFlow(definitions: SettingsFlowStep[]) {
   );
 
   const saveStep = useCallback(
-    async (id: PersistedStepId): Promise<SaveOutcome> => {
+    async (id: PersistedStepId, stepUpToken?: string): Promise<SaveOutcome> => {
       if (savingRef.current.has(id)) return { outcome: 'skipped' };
       const definition = definitionsRef.current.find((def) => def.id === id);
       const record = stepsRef.current[id];
@@ -230,7 +230,7 @@ export function useAccountSettingsFlow(definitions: SettingsFlowStep[]) {
       });
 
       try {
-        const confirmed = await definition.persist(record.draft);
+        const confirmed = await definition.persist(record.draft, stepUpToken);
         commitSteps((prev) => {
           const current = prev[id];
           return current ? { ...prev, [id]: recordSaveSuccess(current, confirmed) } : prev;
@@ -258,15 +258,16 @@ export function useAccountSettingsFlow(definitions: SettingsFlowStep[]) {
   );
 
   const retryStep = useCallback(
-    async (id: PersistedStepId): Promise<SaveOutcome> => {
+    async (id: PersistedStepId, stepUpToken?: string): Promise<SaveOutcome> => {
       const record = stepsRef.current[id];
       if (!record || !canRetryRecord(record)) return { outcome: 'skipped' };
-      return saveStep(id);
+      return saveStep(id, stepUpToken);
     },
     [saveStep],
   );
 
-  const savePendingSteps = useCallback(async (): Promise<SavePendingResult> => {
+  const savePendingSteps = useCallback(
+    async (stepUpToken?: string): Promise<SavePendingResult> => {
     const saved: PersistedStepId[] = [];
     let blocked: SaveOutcome | null = null;
     const handled = new Set<PersistedStepId>();
@@ -291,7 +292,10 @@ export function useAccountSettingsFlow(definitions: SettingsFlowStep[]) {
       if (!isStepDirty(record)) continue;
 
       handled.add(id);
-      const outcome = await saveStep(id);
+      const outcome = await saveStep(
+        id,
+        id === 'privacy' ? stepUpToken : undefined,
+      );
       if (outcome.outcome === 'saved') {
         saved.push(id);
         continue;
@@ -302,7 +306,9 @@ export function useAccountSettingsFlow(definitions: SettingsFlowStep[]) {
     }
 
     return { saved, blocked };
-  }, [saveStep]);
+    },
+    [saveStep],
+  );
 
   const resumeSession = useCallback(async (): Promise<boolean> => {
     const alive = await verifySession();

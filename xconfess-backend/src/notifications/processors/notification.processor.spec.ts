@@ -92,6 +92,19 @@ describe('NotificationProcessor', () => {
     );
   });
 
+  it('rejects unsupported job names so BullMQ records the failure', async () => {
+    const job = {
+      name: 'unsupported-notification-job',
+      id: 'job-unknown',
+      data: { userId: 'user-1', type: 'test', title: 'Title', message: 'Message' },
+    } as unknown as Job<NotificationJobData>;
+
+    await expect(processor.process(job)).rejects.toThrow(
+      'Unsupported notification job name',
+    );
+    expect(emailNotificationService.sendEmail).not.toHaveBeenCalled();
+  });
+
   it('should count retries for non-exhausted failed jobs', async () => {
     const job = {
       name: 'send-notification',

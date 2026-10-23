@@ -3,6 +3,7 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Queue, Worker, Job } from 'bullmq';
 import { ConfigService } from '@nestjs/config';
 import { ConfessionDraftService } from './confession-draft.service';
+import { QUEUE_WORKER_CONCURRENCY } from '../config/queue-concurrency.config';
 
 const PUBLISH_ONE_JOB_OPTIONS = {
   attempts: 5,
@@ -87,7 +88,11 @@ export class ConfessionDraftQueue implements OnModuleDestroy {
           return;
         }
       },
-      { connection: redisConfig },
+      {
+        connection: redisConfig,
+        concurrency:
+          QUEUE_WORKER_CONCURRENCY['confession-draft-publisher'],
+      },
     );
 
     this.worker.on('error', (err) => {

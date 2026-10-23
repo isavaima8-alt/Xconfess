@@ -1,12 +1,16 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Button } from '@/app/components/ui/button';
 import { useFocusTrap } from '@/app/lib/hooks/useFocusTrap';
 
 interface StepUpModalProps {
   isOpen: boolean;
-  onVerify: (credentials: { password?: string; totpToken?: string }) => void;
+  onVerify: (credentials: {
+    password?: string;
+    totpToken?: string;
+    recoveryCode?: string;
+  }) => void;
   onCancel: () => void;
   error: string | null;
   isVerifying: boolean;
@@ -21,17 +25,28 @@ export default function StepUpModal({
 }: StepUpModalProps) {
   const [password, setPassword] = useState('');
   const [totpToken, setTotpToken] = useState('');
-  const [mode, setMode] = useState<'password' | 'totp'>('password');
+  const [recoveryCode, setRecoveryCode] = useState('');
+  const [mode, setMode] = useState<'password' | 'totp' | 'recovery'>('password');
 
   const { containerRef } = useFocusTrap({ isOpen, onClose: onCancel, dialog: true });
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setPassword('');
+    setTotpToken('');
+    setRecoveryCode('');
+    setMode('password');
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
   const handleSubmit = () => {
     if (mode === 'password') {
       onVerify({ password });
-    } else {
+    } else if (mode === 'totp') {
       onVerify({ totpToken });
+    } else {
+      onVerify({ recoveryCode });
     }
   };
 
@@ -69,18 +84,29 @@ export default function StepUpModal({
           >
             Authenticator code
           </button>
+          <button
+            type="button"
+            onClick={() => setMode('recovery')}
+            className={`rounded-md px-3 py-1 ${mode === 'recovery' ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900 dark:text-indigo-200' : 'text-gray-500'}`}
+          >
+            Recovery code
+          </button>
         </div>
 
         {mode === 'password' ? (
           <input
+            id="step-up-password"
+            aria-label="Account password"
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder="Enter your password"
             className="mb-3 min-h-[44px] w-full rounded-md border border-gray-300 px-3 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-white"
           />
-        ) : (
+        ) : mode === 'totp' ? (
           <input
+            id="step-up-totp"
+            aria-label="Authenticator code"
             type="text"
             value={totpToken}
             onChange={(e) => setTotpToken(e.target.value)}
@@ -88,10 +114,21 @@ export default function StepUpModal({
             maxLength={6}
             className="mb-3 min-h-[44px] w-full rounded-md border border-gray-300 px-3 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-white"
           />
+        ) : (
+          <input
+            id="step-up-recovery-code"
+            aria-label="Recovery code"
+            type="text"
+            autoComplete="one-time-code"
+            value={recoveryCode}
+            onChange={(e) => setRecoveryCode(e.target.value)}
+            placeholder="Enter a recovery code"
+            className="mb-3 min-h-[44px] w-full rounded-md border border-gray-300 px-3 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+          />
         )}
 
         {error && (
-          <p className="mb-3 text-sm text-red-600 dark:text-red-400">{error}</p>
+          <p role="alert" className="mb-3 text-sm text-red-600 dark:text-red-400">{error}</p>
         )}
 
         <div className="flex justify-end gap-2">

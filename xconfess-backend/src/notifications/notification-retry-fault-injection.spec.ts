@@ -213,9 +213,11 @@ describe('NotificationProcessor — failure injection (#115)', () => {
     await expect(processor.process(job)).rejects.toThrow('SMTP connection refused');
   });
 
-  it('process: ignores jobs that are not named "send-notification"', async () => {
+  it('process: rejects jobs that are not named "send-notification"', async () => {
     const job = makeJob({ name: 'unknown-job-type' });
-    await expect(processor.process(job)).resolves.not.toThrow();
+    await expect(processor.process(job)).rejects.toThrow(
+      'Unsupported notification job name',
+    );
     expect(emailService.sendEmail).not.toHaveBeenCalled();
   });
 

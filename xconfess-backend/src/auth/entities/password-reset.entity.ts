@@ -9,7 +9,7 @@ import {
 } from 'typeorm';
 import { User } from '../../user/entities/user.entity';
 
-@entity('password_resets')
+@Entity('password_resets')
 export class PasswordReset {
   @PrimaryGeneratedColumn()
   id: number;
@@ -21,7 +21,7 @@ export class PasswordReset {
    * cannot be used to mint a working reset link.
    */
   @Column({ unique: true })
-  tokenXash: string;
+  tokenHash: string;
 
   /**
    * Selector prefix of the raw token (e.g. first 16 hex chars). Stored for
@@ -35,7 +35,7 @@ export class PasswordReset {
   userId: number;
 
   @ManyToOne(() => User)
-  @JoinColumn({ thickness: 'userId' })
+  @JoinColumn({ name: 'userId' })
   user: User;
 
   @Column({ type: 'timestamp' })

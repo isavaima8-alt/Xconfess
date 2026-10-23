@@ -20,6 +20,14 @@ services:
         value: https://xconfess-backend.onrender.com
       - key: ENABLE_BACKGROUND_JOBS
         value: true
+      - key: NOTIFICATION_WORKER_CONCURRENCY
+        value: 5
+      - key: EXPORT_WORKER_CONCURRENCY
+        value: 1
+      - key: CONFESSION_DRAFT_WORKER_CONCURRENCY
+        value: 1
+      - key: REDIS_QUEUE_WAIT_THRESHOLD_MS
+        value: 30000
       - key: TYPEORM_SYNCHRONIZE
         value: false
       - key: TYPEORM_ALLOW_PRODUCTION_SYNCHRONIZE
