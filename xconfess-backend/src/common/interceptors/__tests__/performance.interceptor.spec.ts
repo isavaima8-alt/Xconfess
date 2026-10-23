@@ -2,10 +2,20 @@ import { ExecutionContext, CallHandler } from '@nestjs/common';
 import { of } from 'rxjs';
 import { PerformanceInterceptor } from '../performance.interceptor';
 
-function makeContext(method: string, url: string): ExecutionContext {
+function makeContext(
+  method: string,
+  url: string,
+  route?: { baseUrl: string; path: string },
+): ExecutionContext {
+  const matchedRoute = route ?? { baseUrl: '', path: url.split('?')[0] };
   return {
     switchToHttp: () => ({
-      getRequest: () => ({ method, url }),
+      getRequest: () => ({
+        method,
+        url,
+        route: { path: matchedRoute.path },
+        baseUrl: matchedRoute.baseUrl,
+      }),
     }),
   } as unknown as ExecutionContext;
 }
@@ -99,5 +109,26 @@ describe('PerformanceInterceptor', () => {
     const metrics = interceptor.getMetrics();
     expect(metrics['GET /api/confessions']).toBeDefined();
     expect(metrics['POST /api/confessions']).toBeDefined();
+  });
+
+  it('aggregates identifier paths and excludes query strings using the route template', async () => {
+    const route = { baseUrl: '/api/confessions', path: '/:id' };
+    await interceptor
+      .intercept(
+        makeContext('GET', '/api/confessions/user-secret-1?token=one', route),
+        makeHandler(),
+      )
+      .toPromise();
+    await interceptor
+      .intercept(
+        makeContext('GET', '/api/confessions/user-secret-2?token=two', route),
+        makeHandler(),
+      )
+      .toPromise();
+
+    const metrics = interceptor.getMetrics();
+    expect(metrics['GET /api/confessions/:id'].count).toBe(2);
+    expect(Object.keys(metrics).join(' ')).not.toContain('user-secret');
+    expect(Object.keys(metrics).join(' ')).not.toContain('token=');
   });
 });

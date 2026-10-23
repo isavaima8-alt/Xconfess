@@ -10,6 +10,47 @@ import { redactSecretsDeep } from '../utils/redact-secrets';
 type MetricLabels = Record<string, string | number | boolean>;
 type EventSeverity = 'info' | 'warning' | 'alert';
 
+const METRIC_LABEL_VALUES: Record<string, readonly string[]> = {
+  channel: ['email', 'in_app', 'push'],
+  jobName: ['send-notification', 'dead-letter', 'process-export'],
+  notificationType: [
+    'new_message',
+    'message_batch',
+    'system',
+    'mention',
+    'comment_reply',
+  ],
+  outcome: ['success', 'failure', 'terminal', 'retry'],
+  provider: ['smtp', 'primary', 'fallback', 'openai', 'perspective'],
+  queue: [
+    'notifications',
+    'notifications-dlq',
+    'export-queue',
+    'confession-draft-publisher',
+  ],
+  reason: [
+    'actor_blocked',
+    'actor_muted',
+    'background_jobs_disabled',
+    'circuit_open_no_fallback',
+    'email_preference_disabled',
+    'transporter_not_initialized',
+  ],
+  retry_mode: ['fallback'],
+  searchType: ['fulltext', 'hybrid', 'ilike'],
+  template_key: [
+    'email_verification',
+    'export_ready',
+    'notification',
+    'password_reset',
+    'welcome',
+  ],
+  template_track: ['active', 'canary'],
+  template_version: ['1', '2', '3', 'v1', 'v2', 'v3'],
+  attempt: ['0', '1', '2', '3', '4', '5'],
+};
+const MAX_METRIC_SERIES = 1000;
+
 interface StructuredEvent {
   event: string;
   severity: EventSeverity;
@@ -172,25 +213,44 @@ export class AppLogger implements NestLoggerService {
   private serializeLabels(labels?: MetricLabels): string {
     if (!labels || Object.keys(labels).length === 0) return '';
     return Object.entries(labels)
+      .filter(([key]) =>
+        Object.prototype.hasOwnProperty.call(METRIC_LABEL_VALUES, key),
+      )
       .sort(([a], [b]) => a.localeCompare(b))
-      .map(([key, value]) => `${key}=${this.normalizeLabelValue(value)}`)
+      .map(([key, value]) => {
+        const normalizedValue = this.normalizeLabelValue(value);
+        const allowedValues = METRIC_LABEL_VALUES[key];
+        return `${key}=${allowedValues.includes(normalizedValue) ? normalizedValue : 'other'}`;
+      })
       .join(',');
   }
 
-  private metricKey(name: string, labels?: MetricLabels): string {
+  private metricKey(
+    name: string,
+    labels: MetricLabels | undefined,
+    store: Map<string, unknown>,
+  ): string {
+    const safeName = /^[a-zA-Z][a-zA-Z0-9_.]{0,79}$/.test(name)
+      ? name
+      : 'invalid_metric';
     const serializedLabels = this.serializeLabels(labels);
-    return serializedLabels ? `${name}|${serializedLabels}` : name;
+    const key = serializedLabels
+      ? `${safeName}|${serializedLabels}`
+      : safeName;
+    return !store.has(key) && store.size >= MAX_METRIC_SERIES - 1
+      ? '__metric_series_overflow__'
+      : key;
   }
 
   incrementCounter(name: string, value = 1, labels?: MetricLabels): number {
-    const key = this.metricKey(name, labels);
+    const key = this.metricKey(name, labels, this.counters);
     const next = (this.counters.get(key) ?? 0) + value;
     this.counters.set(key, next);
     return next;
   }
 
   setGauge(name: string, value: number, labels?: MetricLabels): number {
-    const key = this.metricKey(name, labels);
+    const key = this.metricKey(name, labels, this.gauges);
     this.gauges.set(key, value);
     return value;
   }
@@ -200,7 +260,7 @@ export class AppLogger implements NestLoggerService {
     durationMs: number,
     labels?: MetricLabels,
   ): TimerAggregate {
-    const key = this.metricKey(name, labels);
+    const key = this.metricKey(name, labels, this.timers);
     const current = this.timers.get(key);
 
     const next: TimerAggregate = current

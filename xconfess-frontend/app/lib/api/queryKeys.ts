@@ -50,6 +50,10 @@ export const queryKeys = {
       stats: () => ["admin", "reports", "stats"] as const,
     },
 
+    actionApprovals: {
+      all: () => ["admin", "actionApprovals"] as const,
+    },
+
     users: {
       // ["admin", "users"] — invalidates every user query
       all: () => ["admin", "users"] as const,

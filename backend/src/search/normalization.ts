@@ -7,6 +7,14 @@
  * - Apply language-specific token boundaries (e.g. CJK, Thai) while keeping
  *   safe fallbacks for unknown languages.
  * - Never throw on malformed input; degrade to a conservative fallback.
+ *
+ * Advanced query grammar (allowlisted):
+ * - Free terms: `foo bar`
+ * - Field-scoped terms: `field:value` where `field` is in ALLOWED_FIELDS.
+ * - Quoted phrases: `"exact phrase"` (optionally field-scoped: `title:"a b"`).
+ * - Negation prefix: `-term` / `-field:value` / `-"phrase"`.
+ * Anything else (unknown operators, unbalanced quotes, unknown fields,
+ * excessive complexity) is rejected with a stable error code.
  */
 
 export type SupportedLanguage =
@@ -179,189 +187,211 @@ export function normalizeQuery(
   return normalizeForSearch(input, options).tokens;
 }
 
+// ---------------------------------------------------------------------------
+// Advanced query grammar
+// ---------------------------------------------------------------------------
+
+/** Fields that may be used as `field:value` scopes in advanced queries. */
+export const ALLOWED_FIELDS = [
+  'title',
+  'body',
+  'author',
+  'tag',
+  'category',
+  'language',
+] as const;
+
+export type AllowedField = (typeof ALLOWED_FIELDS)[number];
+
+/** Stable, documented validation error codes for advanced query parsing. */
+export type QueryValidationErrorCode =
+  | 'EMPTY_QUERY'
+  | 'UNKNOWN_FIELD'
+  | 'UNBALANCED_QUOTES'
+  | 'UNSUPPORTED_OPERATOR'
+  | 'TOO_MANY_CLAUSES'
+  | 'TOO_MANY_TOKENS'
+  | 'CLAUSE_TOO_LONG';
+
+export interface QueryValidationError {
+  code: QueryValidationErrorCode;
+  message: string;
+  /** Character offset in the original query where the problem was detected. */
+  position?: number;
+}
+
+export interface QueryClause {
+  /** Field scope, or null for a free-text clause. */
+  field: AllowedField | null;
+  /** True when the clause is negated with a leading `-`. */
+  negated: boolean;
+  /** True when the clause originated from a quoted phrase. */
+  phrase: boolean;
+  /** Normalized tokens for the clause. */
+  tokens: string[];
+}
+
+export interface ParsedQuery {
+  ok: true;
+  clauses: QueryClause[];
+}
+
+export interface QueryParseFailure {
+  ok: false;
+  error: QueryValidationError;
+}
+
+export type QueryParseResult = ParsedQuery | QueryParseFailure;
+
+/** Complexity caps to prevent unexpectedly expensive queries. */
+export const QUERY_LIMITS = {
+  /** Maximum number of clauses (terms/phrases) in a single query. */
+  maxClauses: 32,
+  /** Maximum number of normalized tokens across the whole query. */
+  maxTokens: 128,
+  /** Maximum length (in characters) of a single clause value. */
+  maxClauseLength: 256,
+} as const;
+
+const FIELD_SET: ReadonlySet<string> = new Set(ALLOWED_FIELDS);
+
+// Characters that look like operators but are not part of the allowlisted
+// grammar. Rejecting them keeps behavior predictable and avoids expensive
+// wildcard/regex-style queries.
+const UNSUPPORTED_OPERATOR_PATTERN = /[~^*?()[\]{}|\\]/;
+
+function fail(
+  code: QueryValidationErrorCode,
+  message: string,
+  position?: number,
+): QueryParseFailure {
+  return { ok: false, error: { code, message, position } };
+}
+
 /**
- * Ranking configuration parameters that affect feed ordering. These are the
- * versioned knobs a staged rollout can compare and roll back.
+ * Parse an advanced search query against the documented allowlisted grammar.
+ *
+ * Grammar (informal):
+ *   query   := clause*
+ *   clause  := '-'? ( field ':' )? value
+ *   value   := word | '"' phrase '"'
+ *
+ * Returns a discriminated result; never throws. Malformed or disallowed input
+ * yields a stable `QueryValidationErrorCode`.
  */
-export interface RankingParameters {
-  /** Weight applied to lexical/token overlap between query and document. */
-  lexicalWeight: number;
-  /** Weight applied to recency decay. */
-  recencyWeight: number;
-  /** Weight applied to engagement signals. */
-  engagementWeight: number;
-  /** Half-life (in hours) for recency decay; must be > 0. */
-  recencyHalfLifeHours: number;
-}
-
-/** A versioned, immutable ranking configuration snapshot. */
-export interface RankingConfigVersion {
-  /** Monotonic version identifier; each change is identifiable and reversible. */
-  version: number;
-  /** Human-readable label for the change (e.g. PR or ticket reference). */
-  label: string;
-  parameters: RankingParameters;
-}
-
-/** A single isolated fixture used to compare candidate vs current configs. */
-export interface RankingFixture {
-  id: string;
-  /** Relevance score in [0, 1] the ideal ranking would assign. */
-  relevance: number;
-  /** Age of the item in hours (drives recency decay). */
-  ageHours: number;
-  /** Engagement score in [0, 1]. */
-  engagement: number;
-  /** Lexical/token overlap score in [0, 1]. */
-  lexical: number;
-}
-
-/** Observable rollout/rollback criteria for a staged rollout. */
-export interface RolloutCriteria {
-  /** Maximum allowed mean absolute score delta per fixture before rollout is blocked. */
-  maxMeanAbsDelta: number;
-  /** Maximum allowed fraction of fixtures whose rank order flips. */
-  maxRankFlipRatio: number;
-}
-
-export interface RankingComparison {
-  /** Mean absolute score delta between candidate and current across fixtures. */
-  meanAbsDelta: number;
-  /** Fraction of fixtures whose relative rank order changed. */
-  rankFlipRatio: number;
-  /** True when both observable criteria are within bounds. */
-  withinBounds: boolean;
-  /** Per-fixture deltas for observability/debugging. */
-  deltas: Array<{ id: string; current: number; candidate: number; delta: number }>;
-}
-
-export type RolloutDecision =
-  | { action: 'rollout'; comparison: RankingComparison }
-  | { action: 'rollback'; comparison: RankingComparison; reason: string };
-
-const DEFAULT_ROLLOUT_CRITERIA: RolloutCriteria = {
-  maxMeanAbsDelta: 0.15,
-  maxRankFlipRatio: 0.25,
-};
-
-function assertFiniteNonNegative(value: number, name: string): void {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
-    throw new Error(`Invalid ranking parameter "${name}": expected finite non-negative number`);
+export function parseAdvancedQuery(
+  input: unknown,
+  options: NormalizationOptions = {},
+): QueryParseResult {
+  let raw: string;
+  try {
+    raw = typeof input === 'string' ? input : input == null ? '' : String(input);
+  } catch {
+    raw = '';
   }
-}
 
-/**
- * Validate ranking parameters. Throws on invalid input so a bad configuration
- * fails fast at the owning boundary rather than silently degrading the feed.
- */
-export function validateRankingParameters(parameters: RankingParameters): void {
-  assertFiniteNonNegative(parameters.lexicalWeight, 'lexicalWeight');
-  assertFiniteNonNegative(parameters.recencyWeight, 'recencyWeight');
-  assertFiniteNonNegative(parameters.engagementWeight, 'engagementWeight');
-  if (
-    typeof parameters.recencyHalfLifeHours !== 'number' ||
-    !Number.isFinite(parameters.recencyHalfLifeHours) ||
-    parameters.recencyHalfLifeHours <= 0
-  ) {
-    throw new Error('Invalid ranking parameter "recencyHalfLifeHours": expected finite positive number');
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return fail('EMPTY_QUERY', 'Query must not be empty.');
   }
-}
 
-/**
- * Create a new versioned ranking configuration. Each call yields a distinct,
- * immutable snapshot so changes are identifiable and reversible.
- */
-export function createRankingConfigVersion(
-  version: number,
-  label: string,
-  parameters: RankingParameters,
-): RankingConfigVersion {
-  if (!Number.isInteger(version) || version < 1) {
-    throw new Error('Invalid ranking config version: expected positive integer');
-  }
-  validateRankingParameters(parameters);
-  return Object.freeze({
-    version,
-    label,
-    parameters: Object.freeze({ ...parameters }),
-  });
-}
+  const clauses: QueryClause[] = [];
+  let totalTokens = 0;
+  let i = 0;
+  const len = trimmed.length;
 
-/** Score a fixture under a given ranking configuration. */
-export function scoreFixture(fixture: RankingFixture, parameters: RankingParameters): number {
-  const decay = Math.pow(0.5, fixture.ageHours / parameters.recencyHalfLifeHours);
-  return (
-    parameters.lexicalWeight * fixture.lexical +
-    parameters.recencyWeight * decay +
-    parameters.engagementWeight * fixture.engagement
-  );
-}
+  while (i < len) {
+    // Skip whitespace between clauses.
+    while (i < len && /\s/.test(trimmed[i])) i++;
+    if (i >= len) break;
 
-/**
- * Compare a candidate configuration against the current one on an isolated
- * fixture set. Pure and side-effect free so it can run before any rollout.
- */
-export function compareRankingConfigs(
-  current: RankingConfigVersion,
-  candidate: RankingConfigVersion,
-  fixtures: RankingFixture[],
-  criteria: RolloutCriteria = DEFAULT_ROLLOUT_CRITERIA,
-): RankingComparison {
-  validateRankingParameters(current.parameters);
-  validateRankingParameters(candidate.parameters);
+    const clauseStart = i;
+    let negated = false;
+    if (trimmed[i] === '-') {
+      negated = true;
+      i++;
+    }
 
-  const deltas = fixtures.map((fixture) => {
-    const currentScore = scoreFixture(fixture, current.parameters);
-    const candidateScore = scoreFixture(fixture, candidate.parameters);
-    return {
-      id: fixture.id,
-      current: currentScore,
-      candidate: candidateScore,
-      delta: candidateScore - currentScore,
-    };
-  });
+    // Optional field scope: `field:` where field is allowlisted.
+    let field: AllowedField | null = null;
+    const fieldMatch = /^([A-Za-z_][A-Za-z0-9_]*):/.exec(trimmed.slice(i));
+    if (fieldMatch) {
+      const candidate = fieldMatch[1].toLowerCase();
+      if (!FIELD_SET.has(candidate)) {
+        return fail(
+          'UNKNOWN_FIELD',
+          `Unknown field "${fieldMatch[1]}". Allowed fields: ${ALLOWED_FIELDS.join(', ')}.`,
+          i,
+        );
+      }
+      field = candidate as AllowedField;
+      i += fieldMatch[0].length;
+    }
 
-  const meanAbsDelta =
-    deltas.length === 0
-      ? 0
-      : deltas.reduce((sum, d) => sum + Math.abs(d.delta), 0) / deltas.length;
+    // Value: quoted phrase or bare word.
+    let value: string;
+    let phrase = false;
+    if (trimmed[i] === '"') {
+      phrase = true;
+      const close = trimmed.indexOf('"', i + 1);
+      if (close === -1) {
+        return fail('UNBALANCED_QUOTES', 'Unbalanced quotes in query.', i);
+      }
+      value = trimmed.slice(i + 1, close);
+      i = close + 1;
+    } else {
+      const start = i;
+      while (i < len && !/\s/.test(trimmed[i])) i++;
+      value = trimmed.slice(start, i);
+    }
 
-  // Rank flip: relative order of a fixture pair changes between configs.
-  let flips = 0;
-  let pairs = 0;
-  for (let i = 0; i < deltas.length; i += 1) {
-    for (let j = i + 1; j < deltas.length; j += 1) {
-      pairs += 1;
-      const currentOrder = Math.sign(deltas[i].current - deltas[j].current);
-      const candidateOrder = Math.sign(deltas[i].candidate - deltas[j].candidate);
-      if (currentOrder !== candidateOrder) flips += 1;
+    if (!value) {
+      return fail('UNSUPPORTED_OPERATOR', 'Empty clause value.', clauseStart);
+    }
+
+    if (value.length > QUERY_LIMITS.maxClauseLength) {
+      return fail(
+        'CLAUSE_TOO_LONG',
+        `Clause exceeds maximum length of ${QUERY_LIMITS.maxClauseLength} characters.`,
+        clauseStart,
+      );
+    }
+
+    if (UNSUPPORTED_OPERATOR_PATTERN.test(value)) {
+      return fail(
+        'UNSUPPORTED_OPERATOR',
+        'Query contains an unsupported operator or wildcard.',
+        clauseStart,
+      );
+    }
+
+    const tokens = normalizeQuery(value, options);
+    if (tokens.length === 0) {
+      return fail('UNSUPPORTED_OPERATOR', 'Clause produced no searchable tokens.', clauseStart);
+    }
+
+    totalTokens += tokens.length;
+    if (totalTokens > QUERY_LIMITS.maxTokens) {
+      return fail(
+        'TOO_MANY_TOKENS',
+        `Query exceeds maximum of ${QUERY_LIMITS.maxTokens} tokens.`,
+        clauseStart,
+      );
+    }
+
+    clauses.push({ field, negated, phrase, tokens });
+    if (clauses.length > QUERY_LIMITS.maxClauses) {
+      return fail(
+        'TOO_MANY_CLAUSES',
+        `Query exceeds maximum of ${QUERY_LIMITS.maxClauses} clauses.`,
+        clauseStart,
+      );
     }
   }
-  const rankFlipRatio = pairs === 0 ? 0 : flips / pairs;
 
-  const withinBounds =
-    meanAbsDelta <= criteria.maxMeanAbsDelta && rankFlipRatio <= criteria.maxRankFlipRatio;
-
-  return { meanAbsDelta, rankFlipRatio, withinBounds, deltas };
-}
-
-/**
- * Decide whether to roll out or roll back a candidate configuration based on
- * observable criteria. Rollback is the default on any out-of-bounds signal.
- */
-export function decideRollout(
-  current: RankingConfigVersion,
-  candidate: RankingConfigVersion,
-  fixtures: RankingFixture[],
-  criteria: RolloutCriteria = DEFAULT_ROLLOUT_CRITERIA,
-): RolloutDecision {
-  const comparison = compareRankingConfigs(current, candidate, fixtures, criteria);
-  if (comparison.withinBounds) {
-    return { action: 'rollout', comparison };
+  if (clauses.length === 0) {
+    return fail('EMPTY_QUERY', 'Query must not be empty.');
   }
-  const reason =
-    comparison.meanAbsDelta > criteria.maxMeanAbsDelta
-      ? `mean absolute delta ${comparison.meanAbsDelta.toFixed(4)} exceeds ${criteria.maxMeanAbsDelta}`
-      : `rank flip ratio ${comparison.rankFlipRatio.toFixed(4)} exceeds ${criteria.maxRankFlipRatio}`;
-  return { action: 'rollback', comparison, reason };
+
+  return { ok: true, clauses };
 }

@@ -12,8 +12,17 @@ const mockToast = { success: jest.fn(), error: jest.fn(), info: jest.fn() };
 jest.mock("@/app/components/common/Toast", () => ({
   useGlobalToast: () => mockToast,
 }));
+jest.mock("@/app/lib/api/admin", () => ({
+  adminApi: {
+    requestStepUp: jest.fn().mockResolvedValue({
+      stepUpToken: "fresh-step-up-proof",
+      expiresIn: 300,
+    }),
+  },
+}));
 
 import PrivacySettingsPage from "@/app/(dashboard)/settings/privacy/page";
+import { adminApi } from "@/app/lib/api/admin";
 
 const defaultSettings = {
   isDiscoverable: true,
@@ -31,12 +40,21 @@ function mockFetch(settings = defaultSettings) {
         json: () => Promise.resolve(body),
       });
     }
+
     // GET
     return Promise.resolve({
       ok: true,
       json: () => Promise.resolve(settings),
     });
   });
+}
+
+async function confirmStepUp(user: ReturnType<typeof userEvent.setup>) {
+  const passwordInput = screen.getByLabelText("Account password");
+  await user.click(passwordInput);
+  await user.type(passwordInput, "Current!Pass1");
+  expect(passwordInput).toHaveValue("Current!Pass1");
+  await user.click(screen.getByRole("button", { name: "Verify" }));
 }
 
 describe("PrivacySettingsPage", () => {
@@ -141,6 +159,12 @@ describe("PrivacySettingsPage", () => {
 
     const saveButton = screen.getByRole("button", { name: /save privacy settings/i });
     await user.click(saveButton);
+    expect(screen.getByRole("dialog", { name: "Confirm your identity" })).toBeInTheDocument();
+    expect(global.fetch).not.toHaveBeenCalledWith(
+      "/api/users/privacy-settings",
+      expect.objectContaining({ method: "PATCH" }),
+    );
+    await confirmStepUp(user);
 
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith(
@@ -155,6 +179,18 @@ describe("PrivacySettingsPage", () => {
     expect(mockToast.success).toHaveBeenCalledWith(
       "Privacy settings saved successfully",
     );
+    expect(adminApi.requestStepUp).toHaveBeenCalledWith({
+      password: "Current!Pass1",
+    });
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/users/privacy-settings",
+      expect.objectContaining({
+        method: "PATCH",
+        headers: expect.objectContaining({
+          "x-step-up-token": "fresh-step-up-proof",
+        }),
+      }),
+    );
   });
 
   it("shows an error toast when loading fails", async () => {
@@ -167,11 +203,13 @@ describe("PrivacySettingsPage", () => {
 
     await waitFor(() => {
       expect(mockToast.error).toHaveBeenCalledWith(
-        "Failed to load privacy settings",
+        "An unexpected error occurred. Please try again.",
       );
     });
 
-    expect(screen.getByText(/Failed to load/)).toBeInTheDocument();
+    expect(
+      screen.getByText("An unexpected error occurred. Please try again."),
+    ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
   });
 
@@ -198,10 +236,11 @@ describe("PrivacySettingsPage", () => {
     // Toggle and save
     await user.click(screen.getAllByRole("switch")[0]);
     await user.click(screen.getByRole("button", { name: /save privacy settings/i }));
+    await confirmStepUp(user);
 
     await waitFor(() => {
       expect(mockToast.error).toHaveBeenCalledWith(
-        "Failed to save privacy settings",
+        "An unexpected error occurred. Please try again.",
       );
     });
   });
@@ -219,5 +258,67 @@ describe("PrivacySettingsPage", () => {
 
     expect(enabledBadges).toHaveLength(3);
     expect(disabledBadges).toHaveLength(1);
+  });
+
+  it("renders data flow categories and effective privacy posture overview", async () => {
+    render(<PrivacySettingsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Profile Discovery")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("Identity & Discovery Data Flow")).toBeInTheDocument();
+    expect(screen.getByText("Content & Interaction Data Flow")).toBeInTheDocument();
+    expect(screen.getByText("Analytics & Service Telemetry Data Flow")).toBeInTheDocument();
+    expect(screen.getByText("Notification & Communication Data Flow")).toBeInTheDocument();
+
+    expect(screen.getByText(/Effective Privacy Posture:/)).toBeInTheDocument();
+    expect(screen.getByText("Effective state saved")).toBeInTheDocument();
+  });
+
+  it("links each control to its affected product behavior", async () => {
+    render(<PrivacySettingsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Profile Discovery")).toBeInTheDocument();
+    });
+
+    const searchLink = screen.getByRole("link", { name: /Public Search & Directory/i });
+    expect(searchLink).toHaveAttribute("href", "/search");
+
+    const confessionsLink = screen.getByRole("link", { name: /Confession Discussions/i });
+    expect(confessionsLink).toHaveAttribute("href", "/confessions");
+
+    const analyticsLink = screen.getByRole("link", { name: /Activity Analytics & Telemetry/i });
+    expect(analyticsLink).toHaveAttribute("href", "/analytics");
+
+    const notificationLink = screen.getByRole("link", { name: /Manage notification preferences/i });
+    expect(notificationLink).toHaveAttribute("href", "/settings/notifications");
+  });
+
+  it("displays pending changes diff and allows discarding modifications", async () => {
+    const user = userEvent.setup();
+    render(<PrivacySettingsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Profile Discovery")).toBeInTheDocument();
+    });
+
+    // Toggle Profile Discovery to off
+    const discoveryToggle = screen.getAllByRole("switch")[0];
+    await user.click(discoveryToggle);
+
+    expect(screen.getByText(/1 pending change/i)).toBeInTheDocument();
+    expect(screen.getByText(/Pending change \(Unsaved\)/i)).toBeInTheDocument();
+
+    const discardButton = screen.getByRole("button", { name: /discard changes/i });
+    expect(discardButton).toBeInTheDocument();
+
+    // Click discard
+    await user.click(discardButton);
+
+    expect(screen.queryByText(/pending change/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /save privacy settings/i })).toBeDisabled();
+    expect(discoveryToggle).toHaveAttribute("aria-checked", "true");
   });
 });

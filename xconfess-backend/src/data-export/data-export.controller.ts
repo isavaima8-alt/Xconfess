@@ -169,6 +169,8 @@ export class DataExportController {
       throw new UnauthorizedException('Invalid download link.');
     }
 
+    await this.exportService.assertCanDeliverExport(id, userId);
+
     // 3. Validate one-time token (single-file downloads only)
     if (chunkIndex === undefined) {
       const singleFileToken = token as string;

@@ -150,7 +150,7 @@ export default function ReportList() {
 
       {/* Filters */}
       <div className="min-w-0 bg-white dark:bg-gray-800 shadow rounded-lg p-4">
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-5">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
               Status
@@ -221,41 +221,42 @@ export default function ReportList() {
               className="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 dark:bg-gray-700 dark:text-white"
             />
           </div>
-          <div className="flex flex-wrap items-end gap-2">
-            <ExportCsvButton
-              onClick={() => {
-                const exportData: Record<string, unknown>[] = reports.map((r: Report) => ({
-                  id: r.id,
-                  type: r.type,
-                  status: r.status,
-                  reporter: r.reporter?.username || "Anonymous",
-                  reason: r.reason || "",
-                  createdAt: new Date(r.createdAt).toLocaleString(),
-                  resolvedAt: r.resolvedAt
-                    ? new Date(r.resolvedAt).toLocaleString()
-                    : "",
-                }));
-                triggerExport(
-                  exportData,
-                  `reports-${new Date().toISOString().split("T")[0]}.csv`,
-                );
-              }}
-              isExporting={isExportingCsv}
-              label="Export Reports CSV"
-              className="min-h-[44px]"
-            />
-            {selectedIds.size > 0 && (
-              <Button
-                variant="default"
-                size="sm"
-                onClick={handleBulkResolve}
-                aria-label={`Resolve ${selectedIds.size} selected reports`}
-                className="min-h-[44px] rounded-md bg-indigo-600 px-4 py-2 text-sm text-white hover:bg-indigo-700"
-              >
-                Resolve Selected ({selectedIds.size})
-              </Button>
-            )}
-          </div>
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-gray-200 dark:border-gray-700 pt-3">
+          <ExportCsvButton
+            onClick={() => {
+              const exportData: Record<string, unknown>[] = reports.map((r: Report) => ({
+                id: r.id,
+                type: r.type,
+                status: r.status,
+                reporter: r.reporter?.username || "Anonymous",
+                reason: r.reason || "",
+                createdAt: new Date(r.createdAt).toLocaleString(),
+                resolvedAt: r.resolvedAt
+                  ? new Date(r.resolvedAt).toLocaleString()
+                  : "",
+              }));
+              triggerExport(
+                exportData,
+                `reports-${new Date().toISOString().split("T")[0]}.csv`,
+              );
+            }}
+            isExporting={isExportingCsv}
+            label="Export Reports CSV"
+            className="min-h-[44px] w-full sm:w-auto"
+          />
+          {selectedIds.size > 0 && (
+            <Button
+              variant="default"
+              size="sm"
+              onClick={handleBulkResolve}
+              aria-label={`Resolve ${selectedIds.size} selected reports`}
+              className="min-h-[44px] w-full sm:w-auto rounded-md bg-indigo-600 px-4 py-2 text-sm text-white hover:bg-indigo-700"
+            >
+              Resolve Selected ({selectedIds.size})
+            </Button>
+          )}
         </div>
       </div>
 
@@ -283,7 +284,48 @@ export default function ReportList() {
         </div>
       ) : (
         <div className="min-w-0 max-w-full overflow-hidden rounded-lg bg-white shadow dark:bg-gray-800">
-          <div className="max-w-full overflow-x-auto overscroll-x-contain">
+          {/* Stacked Cards for 200%/400% Zoom and Small Viewports */}
+          <div className="block divide-y divide-gray-200 dark:divide-gray-700 md:hidden" data-testid="reports-card-list">
+            {reports.map((report: Report) => (
+              <div key={`card-${report.id}`} className="space-y-3 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      aria-label={`Select report ${report.id}`}
+                      checked={selectedIds.has(report.id)}
+                      onChange={() => toggleSelect(report.id)}
+                      className="min-h-[44px] min-w-[44px] rounded border-gray-300"
+                    />
+                    <span className="text-sm font-semibold text-gray-900 dark:text-white">
+                      {report.type}
+                    </span>
+                  </div>
+                  <span className={statusClassMap[report.status] ?? statusClassMap['dismissed']}>
+                    {humanizeStatus(report.status)}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-gray-500 dark:text-gray-400">
+                  <span>Reporter: {report.reporter?.username || 'Anonymous'}</span>
+                  <span>{new Date(report.createdAt).toLocaleDateString()}</span>
+                </div>
+                <div className="flex justify-end pt-1">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setSelectedReport(report.id)}
+                    aria-label={`View report ${report.id}`}
+                    className="min-h-[44px] w-full sm:w-auto"
+                  >
+                    View details
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Standard Table View */}
+          <div className="hidden md:block max-w-full overflow-x-auto overscroll-x-contain">
             <table className="min-w-[48rem] divide-y divide-gray-200 dark:divide-gray-700 md:min-w-full">
             <thead className="bg-gray-50 dark:bg-gray-700">
               <tr>

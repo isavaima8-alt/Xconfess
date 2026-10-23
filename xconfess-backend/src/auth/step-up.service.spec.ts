@@ -11,7 +11,10 @@ import { CryptoUtil } from '../common/crypto.util';
 describe('StepUpService', () => {
   const secret = 'test-jwt-secret';
   let jwtService: JwtService;
-  let userService: { findById: jest.Mock };
+  let userService: {
+    findById: jest.Mock;
+    consumeRecoveryCode: jest.Mock;
+  };
   let service: StepUpService;
 
   const password = 'S3cret!pass';
@@ -23,7 +26,10 @@ describe('StepUpService', () => {
 
   beforeEach(() => {
     jwtService = new JwtService({ secret });
-    userService = { findById: jest.fn() };
+    userService = {
+      findById: jest.fn(),
+      consumeRecoveryCode: jest.fn(),
+    };
     const configService = {
       get: jest.fn().mockReturnValue('300'),
     } as unknown as ConfigService;
@@ -74,6 +80,33 @@ describe('StepUpService', () => {
 
       const decoded = jwtService.verify<any>(result.stepUpToken);
       expect(decoded.purpose).toBe(STEP_UP_TOKEN_PURPOSE);
+    });
+
+    it('issues a proof for a valid recovery code and consumes it once', async () => {
+      userService.findById.mockResolvedValue(buildUser());
+      userService.consumeRecoveryCode.mockResolvedValue(true);
+
+      const result = await service.createProof(1, {
+        recoveryCode: 'ABCD1234EFGH5678',
+      } as StepUpDto);
+
+      expect(userService.consumeRecoveryCode).toHaveBeenCalledWith(
+        1,
+        'ABCD1234EFGH5678',
+      );
+      const decoded = jwtService.verify<any>(result.stepUpToken);
+      expect(decoded.purpose).toBe(STEP_UP_TOKEN_PURPOSE);
+    });
+
+    it('rejects a consumed recovery code', async () => {
+      userService.findById.mockResolvedValue(buildUser());
+      userService.consumeRecoveryCode.mockResolvedValue(false);
+
+      await expect(
+        service.createProof(1, { recoveryCode: 'used-code' } as StepUpDto),
+      ).rejects.toMatchObject({
+        constructor: AppException,
+      });
     });
 
     it('rejects an invalid password', async () => {

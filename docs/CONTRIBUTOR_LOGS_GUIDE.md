@@ -15,6 +15,7 @@ When sharing error logs, stack traces, or debugging output in issues or pull req
 - **Credit card or payment information**
 - `authorEmail`, `content`, `ipAddress`, and other request/response body fields that carry PII or secrets
 - **Private user data** (real names, addresses, IDs)
+- **Raw search queries** (`q`, `query`, `searchTerm`, `searchQuery`) — see [Raw Search Query Retention](#raw-search-query-retention)
 
 ### Safe to Keep
 - **Request IDs** (useful for tracing logs)
@@ -119,6 +120,17 @@ Error: Failed to process payment
   Authorization: Bearer [REDACTED_TOKEN]
 ```
 
+### Example 6: Search Request Logs
+
+```
+✌ BAD - Contains the raw query and the searcher's identity:
+GET /api/search?q=my+therapist+name+and+my+diagnosis
+{"route":"/api/search","status":200,"requestId":"req-123","userId":"user_550e8400e29b41d4a716446655440000","query":"my therapist name and my diagnosis"}
+
+✓ GOOD - Query dropped, request ID kept:
+{"route":"/api/search","status":200,"requestId":"req-123","userId":"user_a3f9c2d1b5e7","query":"[REDACTED_SEARCH_QUERY]"}
+```
+
 ## Quick Checklist
 
 Before posting logs in an issue or PR, verify:
@@ -128,6 +140,7 @@ Before posting logs in an issue or PR, verify:
 - [ ] No private keys or seed phrases
 - [ ] No session IDs or sensitive cookies
 - [ ] No raw request or response bodies that contain PII or secrets
+- [ ] No raw search queries or search terms
 - [ ] Request IDs, timestamps, and error messages are kept for context
 
 ## Redaction Format
@@ -137,6 +150,7 @@ Use a consistent redaction format for clarity:
 - `[REDACTED_TOKEN]` — for specific types
 - `[REDACTED_EMAIL]` — for specific types
 - `[REDACTED_PASSWORD]` — for specific types
+- `[REDACTED_SEARCH_QUERY]` — for raw search queries
 
 Or use markers that are clearly placeholder text:
 - `***` (simple placeholder)
@@ -170,7 +184,7 @@ Every request produces a line like:
 ### What is automatically redacted
 
 The structured logger automatically redacts:
-- Any field named `password`, `token`, `secret`, `apiKey`, `authorization`, `cookie`, `authorEmail`, `ipAddress`, etc.
+- Any field named `password`, `token`, `secret`, `apiKey`, `authorization`, `cookie`, `authorEmail`, `ipAddress`, `query`, `searchTerm`, etc.
 - JWT-shaped strings (three base64url segments separated by dots)
 - Long hex strings (40+ characters)
 - Long base64 strings (80+ characters)
@@ -195,6 +209,45 @@ The structured logger automatically redacts:
 ✓ GOOD - Request ID kept, IP masked:
 {"method":"POST","route":"/api/confessions","status":500,"requestId":"req-123","userId":"user_a3f9c2d1b5e7","ip":"192.168.x.x"}
 ```
+
+## Raw Search Query Retention
+
+Raw search queries can reveal sensitive intent (health, relationships, identity) even when they are not tied to a public profile. The search boundary therefore treats raw queries as sensitive data with a bounded lifetime.
+
+### What is stored and why
+
+| Data | Stored? | Purpose |
+| --- | --- | --- |
+| Raw query text | Yes, bounded | Relevance tuning and abuse detection |
+| Normalized query (lowercased, trimmed) | Yes, bounded | Deduplication of the same query |
+| Query hash (salted, one-way) | Yes, bounded | Grouping identical queries without keeping the text |
+| Searcher user ID | No — replaced by a salted hash | Prevent linking queries to a public profile |
+| IP address, email, session ID | No | Not needed for relevance or abuse detection |
+| Result count, latency, timestamp | Yes, bounded | Operational metrics |
+
+### Minimizing identifiers
+
+- Raw queries are never joined to a public profile. The searcher is recorded only as a salted hash so repeated searches can be grouped without identifying the person.
+- IP addresses, emails, and session IDs are never persisted alongside a query.
+- Logs and analytics emit the query hash and result metadata, never the raw query text.
+
+### Bounded expiry
+
+- Stored raw queries expire after a bounded retention window (default 30 days, configurable via `SEARCH_QUERY_RETENTION_DAYS`).
+- Expiry is enforced at the storage boundary: reads and exports filter out records older than the window, and a scheduled purge deletes them.
+- The retention window is capped by configuration; it cannot be set to unlimited.
+
+### Access rules
+
+- Raw query records are readable only by operators with the search-analytics role; ordinary support and contributor access is denied.
+- Access is audited: every read of raw query data records the actor, the reason, and the time.
+- Analytics and dashboards consume aggregated counts and hashes only, never raw text.
+
+### Logs and analytics follow the same policy
+
+- The structured logger redacts `query`, `searchTerm`, and `searchQuery` fields, so raw queries never reach log storage.
+- Analytics events carry the query hash, result count, and latency — not the raw text — and are subject to the same retention window.
+- When sharing search-related logs in an issue or PR, replace the query with `[REDACTED_SEARCH_QUERY]` and keep the `requestId` for tracing.
 
 ## Tracing a Request End-to-End
 

@@ -54,6 +54,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -110,6 +111,8 @@ const jsonOutput = process.argv.includes('--json');
 const allowUnsafe = process.env.ALLOW_UNSAFE_MIGRATIONS === 'true';
 const allowIrreversibleStorage =
   process.env.ALLOW_IRREVERSIBLE_STORAGE === 'true';
+const databaseDriftCheckAuthorized =
+  process.env.MIGRATION_GATE_DATABASE_CHECK === 'true';
 
 const errors = [];
 const warnings = [];
@@ -446,6 +449,87 @@ for (const record of storageMigrations) {
     record.blocking = true;
   } else {
     byFromVersion.set(record.fromVersion, record.file);
+  }
+}
+
+// ── Step 6: optional read-only deployed schema drift check ────────────────────
+
+if (!databaseDriftCheckAuthorized) {
+  const message =
+    'Deployed database drift check skipped; set MIGRATION_GATE_DATABASE_CHECK=true to authorize a read-only check against the configured database.';
+  warn(
+    message,
+    { check: 'schema-drift' }
+  );
+  log(`migration-gate: ${message}`);
+} else {
+  const check = spawnSync(
+    process.execPath,
+    [
+      '-r',
+      'ts-node/register',
+      '-r',
+      'tsconfig-paths/register',
+      'scripts/migration-drift-check.ts',
+    ],
+    {
+      cwd: path.join(ROOT, 'xconfess-backend'),
+      env: process.env,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }
+  );
+
+  let drift;
+  try {
+    drift = JSON.parse(check.stdout || '{}');
+  } catch {
+    drift = null;
+  }
+
+  if (!drift || check.error || typeof drift.ok !== 'boolean') {
+    fail(
+      'Deployed database drift check could not produce a safe diagnostic. Verify the backend runtime and read-only database configuration.',
+      { check: 'schema-drift' }
+    );
+  } else {
+    if (drift.pendingMigrations && drift.pendingMigrations.length > 0) {
+      fail(
+        `Database is missing committed TypeORM migrations: ${drift.pendingMigrations.join(', ')}. Apply reviewed migrations with npm run backend:migration:run.`,
+        { check: 'schema-drift' }
+      );
+    }
+    if (
+      drift.unknownAppliedMigrations &&
+      drift.unknownAppliedMigrations.length > 0
+    ) {
+      fail(
+        `Database contains migration records absent from this checkout: ${drift.unknownAppliedMigrations.join(', ')}. Verify the deployed release and migration table before proceeding.`,
+        { check: 'schema-drift' }
+      );
+    }
+    if (drift.schemaChanges && drift.schemaChanges.length > 0) {
+      fail(
+        `Deployed schema differs from TypeORM entity metadata (${drift.schemaChanges.length} change(s)). Review the schema diff and add a committed migration if the change is intentional:\n` +
+          drift.schemaChanges.map((query) => `  - ${query}`).join('\n'),
+        { check: 'schema-drift' }
+      );
+    }
+    if (!drift.ok && drift.queryError) {
+      fail(drift.queryError, { check: 'schema-drift' });
+    }
+    if (
+      !drift.ok &&
+      !drift.queryError &&
+      !(drift.pendingMigrations || []).length &&
+      !(drift.unknownAppliedMigrations || []).length &&
+      !(drift.schemaChanges || []).length
+    ) {
+      fail(
+        'Deployed database drift check failed without actionable details. Verify the read-only database configuration.',
+        { check: 'schema-drift' }
+      );
+    }
   }
 }
 

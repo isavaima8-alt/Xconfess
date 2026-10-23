@@ -72,25 +72,39 @@ export class StepUpService {
       );
     }
 
-    let verified = false;
+    const provided = [
+      dto.password ? 'password' : null,
+      dto.totpToken ? 'totp' : null,
+      dto.recoveryCode ? 'recovery_code' : null,
+    ].filter(Boolean);
 
-    if (dto.totpToken) {
-      verified = this.verifyTotp(user, dto.totpToken);
-    } else if (dto.password) {
-      verified = await bcrypt.compare(dto.password, user.password);
-    } else {
+    if (provided.length !== 1) {
       throw new AppException(
-        'Either password or totpToken must be provided',
+        'Provide exactly one of password, totpToken, or recoveryCode',
         ErrorCode.MISSING_PARAMETER,
         HttpStatus.BAD_REQUEST,
       );
+    }
+
+    let verified = false;
+    let method: 'password' | 'totp' | 'recovery_code' = 'password';
+
+    if (dto.totpToken) {
+      verified = this.verifyTotp(user, dto.totpToken);
+      method = 'totp';
+    } else if (dto.password) {
+      verified = await bcrypt.compare(dto.password, user.password);
+      method = 'password';
+    } else if (dto.recoveryCode) {
+      verified = await this.userService.consumeRecoveryCode(userId, dto.recoveryCode);
+      method = 'recovery_code';
     }
 
     if (!verified) {
       this.logger.warn({
         event: 'STEP_UP_VERIFICATION_FAILED',
         userId,
-        method: dto.totpToken ? 'totp' : 'password',
+        method,
       });
       throw new AppException(
         'Step-up verification failed',

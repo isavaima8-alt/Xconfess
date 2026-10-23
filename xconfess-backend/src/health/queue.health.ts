@@ -7,6 +7,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { ConfigService } from '@nestjs/config';
+import { QUEUE_WORKER_CONCURRENCY } from '../config/queue-concurrency.config';
 
 interface QueueDetail {
   status: 'up' | 'down' | 'degraded';
@@ -14,6 +15,22 @@ interface QueueDetail {
   counts?: Record<string, number>;
   error?: string;
   latencyMs?: number;
+  /** Total jobs waiting to be processed (waiting + delayed + active). */
+  backlog?: number;
+  /** Age in milliseconds of the oldest waiting job. */
+  waitMs?: number;
+  /** Estimated fleet processing slots, based on registered workers and config. */
+  capacity?: number;
+  /** True when jobs are waiting and all estimated processing slots are active. */
+  saturated?: boolean;
+  /** True when the queue has at least one worker attached. */
+  hasWorkers?: boolean;
+  /** True when the queue is expected to have workers but has none. */
+  missingWorkers?: boolean;
+  /** True when the queue is currently reporting a healthy state. */
+  recovered?: boolean;
+  /** True when the queue is in a degraded (high latency) state. */
+  degraded?: boolean;
 }
 
 /**
@@ -72,11 +89,13 @@ export class QueueHealthIndicator extends HealthIndicator {
       name: string;
       queue: Queue;
       requiresWorkers: boolean;
+      concurrency?: number;
     }> = [
       {
         name: 'notifications',
         queue: this.notifications,
         requiresWorkers: true,
+        concurrency: QUEUE_WORKER_CONCURRENCY.notifications,
       },
       {
         name: 'notifications-dlq',
@@ -87,25 +106,33 @@ export class QueueHealthIndicator extends HealthIndicator {
         name: 'export-queue',
         queue: this.exportQueue,
         requiresWorkers: true,
+        concurrency: QUEUE_WORKER_CONCURRENCY['export-queue'],
       },
       {
         name: 'confession-draft-publisher',
         queue: this.draftQueue,
         requiresWorkers: true,
+        concurrency: QUEUE_WORKER_CONCURRENCY['confession-draft-publisher'],
       },
     ];
 
     const latencyThreshold =
       this.configService.get<number>('REDIS_QUEUE_LATENCY_THRESHOLD_MS') || 250;
 
+    const backlogThreshold =
+      this.configService.get<number>('REDIS_QUEUE_BACKLOG_THRESHOLD') || 1000;
+    const waitThreshold =
+      this.configService.get<number>('REDIS_QUEUE_WAIT_THRESHOLD_MS') || 30000;
+
     const details: Record<string, QueueDetail> = {};
     let allHealthy = true;
 
-    for (const { name, queue, requiresWorkers } of queues) {
+    for (const { name, queue, requiresWorkers, concurrency } of queues) {
       try {
-        const [counts, workers, client] = await Promise.all([
+        const [counts, workers, waitingJobs, client] = await Promise.all([
           queue.getJobCounts('active', 'waiting', 'failed', 'delayed'),
           queue.getWorkers(),
+          queue.getWaiting(0, 0),
           queue.client,
         ]);
 
@@ -114,19 +141,58 @@ export class QueueHealthIndicator extends HealthIndicator {
         const latencyMs = Date.now() - start;
 
         const workerCount = workers.length;
-        const hasWorkers = !requiresWorkers || workerCount > 0;
+        const hasWorkers = workerCount > 0;
+        const missingWorkers = requiresWorkers && !hasWorkers;
         const isDegraded = latencyMs >= latencyThreshold;
-        const healthy = hasWorkers && !isDegraded;
+
+        const backlog =
+          (counts.active ?? 0) +
+          (counts.waiting ?? 0) +
+          (counts.delayed ?? 0);
+        const backlogExceeded = backlog >= backlogThreshold;
+        const oldestWaitingJob = waitingJobs.reduce(
+          (oldest, job) =>
+            !oldest || job.timestamp < oldest.timestamp ? job : oldest,
+          undefined as (typeof waitingJobs)[number] | undefined,
+        );
+        const waitMs = oldestWaitingJob
+          ? Math.max(0, Date.now() - oldestWaitingJob.timestamp)
+          : 0;
+        const capacity = concurrency ? workerCount * concurrency : undefined;
+        const saturated =
+          capacity !== undefined &&
+          capacity > 0 &&
+          (counts.active ?? 0) >= capacity &&
+          (counts.waiting ?? 0) > 0;
+        const waitExceeded = waitMs >= waitThreshold && waitMs > 0;
+
+        const healthy =
+          !missingWorkers &&
+          !isDegraded &&
+          !backlogExceeded &&
+          !waitExceeded;
 
         if (!healthy) {
           allHealthy = false;
         }
 
         details[name] = {
-          status: hasWorkers ? (isDegraded ? 'degraded' : 'up') : 'down',
+          status: missingWorkers
+            ? 'down'
+            : isDegraded || backlogExceeded || waitExceeded
+              ? 'degraded'
+              : 'up',
           workers: workerCount,
+          hasWorkers,
+          missingWorkers,
           counts,
+          backlog,
+          waitMs,
+          capacity,
+          saturated,
           latencyMs,
+          degraded: isDegraded || backlogExceeded || waitExceeded,
+          recovered: healthy,
         };
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
@@ -134,7 +200,13 @@ export class QueueHealthIndicator extends HealthIndicator {
           `Queue health check failed for "${name}": ${message}`,
         );
         allHealthy = false;
-        details[name] = { status: 'down', error: message };
+        details[name] = {
+          status: 'down',
+          error: message,
+          hasWorkers: false,
+          missingWorkers: requiresWorkers,
+          recovered: false,
+        };
       }
     }
 

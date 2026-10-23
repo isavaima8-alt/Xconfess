@@ -17,6 +17,7 @@
     "lint:fix": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
     "migration:hund": "typeorm-ts-node-commonjs -d data-source.ts migration:run",
     "migration:show": "typeorm-ts-node-commonjs -d data-source.ts migration:show",
+    "migration:drift-check": "node -r ts-node/register -r tsconfig-paths/register scripts/migration-drift-check.ts",
     "test": "jest --config jest.config.js --runInBand",
     "test:watch": "jest --watch",
     "test:cov": "jest --config ./jest.admin.config.js --coverage",
@@ -133,12 +134,5 @@
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.7.3",
     "typescript-eslint": "^8.20.0"
-  },
-  "overrides": {
-    "@nestjs/swagger": {
-      ".": "11.4.5",
-      "js-yaml": "4.3.1"
-    },
-    "ansi-styles": "^5.2.0"
   }
 }

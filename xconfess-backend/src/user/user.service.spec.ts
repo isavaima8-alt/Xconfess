@@ -4,6 +4,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { User } from './entities/user.entity';
 import {
+  BadRequestException,
   InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
@@ -11,6 +12,7 @@ import { EmailService } from '../email/email.service';
 import { CryptoUtil } from '../common/crypto.util';
 import { ConfigService } from '@nestjs/config';
 import { ErrorCode } from '../common/errors/error-codes';
+import { DataExportService } from '../data-export/data-export.service';
 
 jest.mock('bcryptjs', () => ({
   hash: jest.fn(),
@@ -22,6 +24,7 @@ describe('UserService', () => {
   let service: UserService;
   let repository: Repository<User>;
   let mockEmailService: any;
+  let mockDataExportService: any;
 
   const mockUser: User = {
     id: 1,
@@ -63,11 +66,15 @@ describe('UserService', () => {
     create: jest.fn(),
     save: jest.fn(),
     update: jest.fn(),
+    remove: jest.fn(),
   };
 
   beforeEach(async () => {
     mockEmailService = {
       sendWelcomeEmail: jest.fn(),
+    };
+    mockDataExportService = {
+      cancelExportsForUser: jest.fn().mockResolvedValue(undefined),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -84,6 +91,10 @@ describe('UserService', () => {
         {
           provide: ConfigService,
           useValue: { get: jest.fn((_key: string, fallback?: unknown) => fallback ?? '') },
+        },
+        {
+          provide: DataExportService,
+          useValue: mockDataExportService,
         },
       ],
     }).compile();
@@ -171,6 +182,10 @@ describe('UserService', () => {
 
       expect(bcrypt.hash).toHaveBeenCalledWith('newpassword123', 10);
       expect(mockRepository.save).toHaveBeenCalled();
+      expect(mockDataExportService.cancelExportsForUser).toHaveBeenCalledWith(
+        '1',
+        'account_deactivated',
+      );
     });
 
     it('should throw InternalServerErrorException on database error', async () => {
@@ -193,6 +208,10 @@ describe('UserService', () => {
       await service.setResetPasswordToken(1, 'reset-token', expiresAt);
 
       expect(mockRepository.save).toHaveBeenCalled();
+      expect(mockDataExportService.cancelExportsForUser).toHaveBeenCalledWith(
+        '1',
+        'account_reactivated',
+      );
     });
 
     it('should throw InternalServerErrorException on database error', async () => {
@@ -503,6 +522,44 @@ describe('UserService', () => {
     });
   });
 
+  describe('recovery code verification', () => {
+    it('consumes a single recovery code exactly once while storing only a verifier hash', async () => {
+      const code = 'ABCD1234EFGH5678';
+      const enc = CryptoUtil.encrypt(JSON.stringify([CryptoUtil.hash(code)]));
+      mockRepository.findOne.mockResolvedValue({
+        ...mockUser,
+        recoveryCodesEncrypted: enc.encrypted,
+        recoveryCodesIv: enc.iv,
+        recoveryCodesTag: enc.tag,
+      });
+      mockRepository.save.mockResolvedValue({
+        ...mockUser,
+        recoveryCodesEncrypted: enc.encrypted,
+        recoveryCodesIv: enc.iv,
+        recoveryCodesTag: enc.tag,
+      });
+
+      const firstUse = await service.consumeRecoveryCode(1, code);
+      const secondUse = await service.consumeRecoveryCode(1, code);
+
+      expect(firstUse).toBe(true);
+      expect(secondUse).toBe(false);
+      expect(mockRepository.save).toHaveBeenCalled();
+    });
+
+    it('rejects a recovery code that is not present in the verifier set', async () => {
+      const enc = CryptoUtil.encrypt(JSON.stringify([CryptoUtil.hash('VALID-ONE')]));
+      mockRepository.findOne.mockResolvedValue({
+        ...mockUser,
+        recoveryCodesEncrypted: enc.encrypted,
+        recoveryCodesIv: enc.iv,
+        recoveryCodesTag: enc.tag,
+      });
+
+      await expect(service.consumeRecoveryCode(1, 'NOT-HERE')).resolves.toBe(false);
+    });
+  });
+
   describe('deactivateAccount', () => {
     it('should deactivate a user account', async () => {
       const userId = 1;
@@ -623,6 +680,70 @@ describe('UserService', () => {
 
       expect(result).toEqual(dto);
       expect(mockRepository.save).toHaveBeenCalled();
+      expect(mockDataExportService.cancelExportsForUser).toHaveBeenCalledWith(
+        '1',
+        'privacy_settings_changed',
+      );
+    });
+  });
+
+  describe('deleteAccount', () => {
+    it('cancels and purges exports before removing the user', async () => {
+      mockRepository.findOne.mockResolvedValue(mockUser);
+      mockRepository.remove.mockResolvedValue(mockUser);
+
+      await service.deleteAccount(1);
+
+      expect(mockDataExportService.cancelExportsForUser).toHaveBeenCalledWith(
+        '1',
+        'account_deleted',
+      );
+      expect(mockRepository.remove).toHaveBeenCalledWith(mockUser);
+    });
+
+    describe('updateSettings', () => {
+      it('rejects credential or identity field mutation through the generic settings route', async () => {
+        await expect(
+          service.updateSettings(1, { password: 'attacker-controlled' }),
+        ).rejects.toThrow(BadRequestException);
+        await expect(
+          service.updateSettings(1, { role: 'admin' }),
+        ).rejects.toThrow(BadRequestException);
+        expect(mockRepository.save).not.toHaveBeenCalled();
+      });
+
+      it('continues to save supported preference properties', async () => {
+        await service.updateSettings(1, {
+          notificationPreferences: { email: false },
+        });
+        expect(mockRepository.save).toHaveBeenCalledWith(mockUser);
+      });
+
+      describe('regenerateRecoveryCodes', () => {
+        it('returns one-time codes and persists only their encrypted verifiers', async () => {
+          const user = { ...mockUser, totpEnabled: true };
+          mockRepository.findOne.mockResolvedValue(user);
+
+          const codes = await service.regenerateRecoveryCodes(1);
+          const savedUser = mockRepository.save.mock.calls[0][0] as User;
+
+          expect(codes).toHaveLength(10);
+          expect(savedUser.recoveryCodesEncrypted).toBeTruthy();
+          expect(savedUser.recoveryCodesEncrypted).not.toContain(codes[0]);
+        });
+
+        it('rejects recovery-code regeneration when authenticator TOTP is disabled', async () => {
+          mockRepository.findOne.mockResolvedValue({
+            ...mockUser,
+            totpEnabled: false,
+          });
+
+          await expect(service.regenerateRecoveryCodes(1)).rejects.toThrow(
+            BadRequestException,
+          );
+          expect(mockRepository.save).not.toHaveBeenCalled();
+        });
+      });
     });
   });
 });

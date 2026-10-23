@@ -30,6 +30,8 @@ export interface PrivacySettings {
   showReactions: boolean;
   /** GDPR-style flag; defaults true when absent in stored JSON */
   dataProcessingConsent?: boolean;
+  blockedUserIds?: number[];
+  mutedUserIds?: number[];
 }
 
 @Entity()
@@ -145,6 +147,30 @@ export class User {
 
   isPersonalizationEnabled(): boolean {
     return this.personalizationEnabled !== false;
+  }
+
+  getBlockedUserIds(): number[] {
+    if (!this.privacySettings?.blockedUserIds) return [];
+    return this.privacySettings.blockedUserIds;
+  }
+
+  getMutedUserIds(): number[] {
+    if (!this.privacySettings?.mutedUserIds) return [];
+    return this.privacySettings.mutedUserIds;
+  }
+
+  isUserBlocked(targetUserId: number): boolean {
+    return this.getBlockedUserIds().includes(targetUserId);
+  }
+
+  isUserMuted(targetUserId: number): boolean {
+    return this.getMutedUserIds().includes(targetUserId);
+  }
+
+  getRelationshipPrecedence(targetUserId: number): 'block' | 'mute' | 'allow' {
+    if (this.isUserBlocked(targetUserId)) return 'block';
+    if (this.isUserMuted(targetUserId)) return 'mute';
+    return 'allow';
   }
 
   @CreateDateColumn()

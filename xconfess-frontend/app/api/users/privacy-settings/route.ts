@@ -1,5 +1,8 @@
 import { createApiErrorResponse } from "@/lib/apiErrorHandler";
-import { resolveBackendRoute } from "@/app/lib/api/proxy";
+import {
+  getSessionAuthorization,
+  resolveBackendRoute,
+} from "@/app/lib/api/proxy";
 
 
 export async function GET(request: Request) {
@@ -9,12 +12,13 @@ export async function GET(request: Request) {
     const backend = resolveBackendRoute(request, "/users/privacy-settings");
 
     const cookie = request.headers.get("cookie") || "";
-
+    const authorization = getSessionAuthorization(request);
     const response = await fetch(backend.url, {
       method: "GET",
       headers: {
         "X-Correlation-ID": correlationId,
         "cookie": cookie,
+        ...(authorization ? { Authorization: authorization } : {}),
       },
     });
 
@@ -53,6 +57,8 @@ export async function PATCH(request: Request) {
     const backend = resolveBackendRoute(request, "/users/privacy-settings");
 
     const cookie = request.headers.get("cookie") || "";
+    const stepUpToken = request.headers.get("x-step-up-token");
+    const authorization = getSessionAuthorization(request);
 
     const response = await fetch(backend.url, {
       method: "PATCH",
@@ -60,6 +66,8 @@ export async function PATCH(request: Request) {
         "Content-Type": "application/json",
         "X-Correlation-ID": correlationId,
         "cookie": cookie,
+        ...(authorization ? { Authorization: authorization } : {}),
+        ...(stepUpToken ? { "x-step-up-token": stepUpToken } : {}),
       },
       body: JSON.stringify(body),
     });

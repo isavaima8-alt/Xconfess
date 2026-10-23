@@ -360,6 +360,7 @@ When adding a new API endpoint, follow the [API endpoint contributor checklist](
 ## Documentation
 
 - [Account Recovery Guide](docs/account-recovery.md) — What to do if you connect the wrong wallet or network
+- [Account Settings Recovery](docs/account-settings-recovery.md) — Per-step persistence, retry semantics, and draft recovery for the multi-step account settings flow
 - [Contributor Guide](docs/CONTRIBUTOR_GUIDE.md) — Local setup, branch hygiene, PR expectations, and validation commands
 
 ## Package Docs
@@ -385,5 +386,5 @@ When adding a new API endpoint, follow the [API endpoint contributor checklist](
 <!-- handsoff-issue-253 -->
 - #253: [Advanced] Make private attachment delivery resumable and access-scoped
 
-<!-- handsoff-issue-258 -->
-- #258: [Advanced] Apply block and mute exclusions before discovery ranking
+<!-- handsoff-issue-242 -->
+- #242: [Advanced] Separate reporter identity from evidence access permissions

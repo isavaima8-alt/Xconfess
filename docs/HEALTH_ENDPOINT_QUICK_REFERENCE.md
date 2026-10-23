@@ -77,6 +77,8 @@ The readiness probe (`/api/health/ready`) checks:
 3. **Queues** — BullMQ queue worker availability and lightweight connection latency. Conditioned on `ENABLE_BACKGROUND_JOBS=true`; returns `mode: disabled` when jobs are off.
    - Measures lightweight latency using a Redis ping on each queue client.
    - Configurable latency threshold via `REDIS_QUEUE_LATENCY_THRESHOLD_MS` (defaults to `250` ms). Latencies exceeding this threshold will mark the queue as `'degraded'` and fail the readiness check (returning 503).
+   - Reports each queue's oldest waiting-job age (`waitMs`), estimated worker capacity, and whether active jobs have filled that capacity while more jobs are waiting (`saturated`).
+   - `REDIS_QUEUE_WAIT_THRESHOLD_MS` defaults to `30000`; an older waiting job degrades readiness. Configure concurrency with `NOTIFICATION_WORKER_CONCURRENCY` (default `5`), `EXPORT_WORKER_CONCURRENCY` (default `1`), and `CONFESSION_DRAFT_WORKER_CONCURRENCY` (default `1`), each from `1` to `100`.
 4. **Schema** — Confession table exists and matches expected schema
 
 ## Degraded dependency behavior
@@ -109,7 +111,10 @@ container.
         "status": "up",
         "workers": 1,
         "counts": { "active": 0, "waiting": 0, "failed": 0, "delayed": 0 },
-        "latencyMs": 12
+        "latencyMs": 12,
+        "waitMs": 0,
+        "capacity": 5,
+        "saturated": false
       }
     },
     "schema": { "status": "up" }

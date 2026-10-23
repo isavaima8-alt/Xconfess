@@ -28,6 +28,8 @@ export interface Confession {
   isAnchored?: boolean;
   stellarTxHash?: string | null;
   tipStats?: TipStats;
+  mediaUrl?: string | null;
+  mediaAspectRatio?: number | null;
 }
 
 export interface Comment {

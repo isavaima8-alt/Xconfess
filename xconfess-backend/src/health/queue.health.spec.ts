@@ -17,12 +17,14 @@ function makeMockQueue(
   workers = 1,
   counts = { active: 0, waiting: 0, failed: 0, delayed: 0 },
   pingMock = jest.fn().mockResolvedValue('PONG'),
+  waitingJobs: Array<{ timestamp: number }> = [],
 ) {
   return {
     getWorkers: jest
       .fn()
       .mockResolvedValue(new Array(workers).fill({ id: 'w1' })),
     getJobCounts: jest.fn().mockResolvedValue(counts),
+    getWaiting: jest.fn().mockResolvedValue(waitingJobs),
     client: Promise.resolve({
       ping: pingMock,
     }),
@@ -35,6 +37,7 @@ function buildModule(
   queueOverrides: Partial<Record<QueueName, MockQueue>>,
   backgroundJobsValue?: string,
   latencyThresholdValue?: number,
+  waitThresholdValue?: number,
 ) {
   const queues = Object.fromEntries(
     QUEUE_NAMES.map((name) => [name, queueOverrides[name] ?? makeMockQueue()]),
@@ -52,6 +55,9 @@ function buildModule(
             }
             if (key === 'REDIS_QUEUE_LATENCY_THRESHOLD_MS') {
               return latencyThresholdValue;
+            }
+            if (key === 'REDIS_QUEUE_WAIT_THRESHOLD_MS') {
+              return waitThresholdValue;
             }
             return undefined;
           }),
@@ -219,10 +225,8 @@ describe('QueueHealthIndicator', () => {
     describe('and a queue throws during the check', () => {
       beforeEach(async () => {
         const broken: MockQueue = {
-          getWorkers: jest
-            .fn()
-            .mockRejectedValue(new Error('ECONNREFUSED')),
-          getJobCounts: jest.fn().mockResolvedValue({}),
+          ...makeMockQueue(),
+          getWorkers: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')),
         };
         const module: TestingModule = await buildModule(
           {
@@ -262,6 +266,61 @@ describe('QueueHealthIndicator', () => {
         expect(result.queues['notifications']).toMatchObject({
           counts: { active: 3, waiting: 10, failed: 1, delayed: 0 },
         });
+      });
+    });
+
+    describe('queue wait and saturation signals', () => {
+      it('reports export saturation while unrelated notification capacity remains healthy', async () => {
+        const saturatedExportQueue = makeMockQueue(
+          1,
+          { active: 1, waiting: 1, failed: 0, delayed: 0 },
+          undefined,
+          [{ timestamp: Date.now() - 1000 }],
+        );
+        const module: TestingModule = await buildModule(
+          { 'export-queue': saturatedExportQueue },
+          'true',
+          undefined,
+          30000,
+        );
+        indicator = module.get(QueueHealthIndicator);
+
+        const result = await indicator.isHealthy('queues');
+
+        expect(result.queues.status).toBe('up');
+        expect(result.queues['export-queue']).toMatchObject({
+          capacity: 1,
+          saturated: true,
+          waitMs: expect.any(Number),
+        });
+        expect(result.queues['notifications']).toMatchObject({
+          status: 'up',
+          capacity: 5,
+          saturated: false,
+        });
+        expect(result.queues['export-queue'].waitMs).toBeGreaterThanOrEqual(
+          1000,
+        );
+      });
+
+      it('degrades readiness when the oldest waiting job exceeds the wait threshold', async () => {
+        const queueWithOldJob = makeMockQueue(
+          1,
+          { active: 0, waiting: 1, failed: 0, delayed: 0 },
+          undefined,
+          [{ timestamp: Date.now() - 5000 }],
+        );
+        const module: TestingModule = await buildModule(
+          { notifications: queueWithOldJob },
+          'true',
+          undefined,
+          1000,
+        );
+        indicator = module.get(QueueHealthIndicator);
+
+        await expect(indicator.isHealthy('queues')).rejects.toThrow(
+          HealthCheckError,
+        );
       });
     });
 

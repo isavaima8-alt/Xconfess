@@ -27,6 +27,12 @@ import { AiModerationService, ModerationStatus } from './ai-moderation.service';
 import { ModerationRepositoryService } from './moderation-repository.service';
 import { InvalidModerationTransitionError } from './moderation-state-machine';
 import { TransitionModerationDto } from './dtos/transition-moderation.dto';
+import { RunEvaluationDto } from './dtos/run-evaluation.dto';
+import {
+  ApprovePolicyImpactDto,
+  PolicyImpactThresholdsDto,
+} from './dtos/policy-impact.dto';
+import { LanguageEvaluationService } from './language-evaluation.service';
 
 class TestModerationDto {
   content!: string;
@@ -37,11 +43,6 @@ class ReviewModerationDto {
   notes?: string;
 }
 
-class UpdateThresholdsDto {
-  highThreshold!: number;
-  mediumThreshold!: number;
-}
-
 @ApiTags('Admin - Moderation')
 @ApiBearerAuth()
 @Controller('admin/moderation')
@@ -50,7 +51,36 @@ export class ModerationController {
   constructor(
     private readonly aiModerationService: AiModerationService,
     private readonly moderationRepoService: ModerationRepositoryService,
+    private readonly languageEvaluationService: LanguageEvaluationService,
   ) {}
+
+  @Post('language-evaluation')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Run privacy-safe multilingual moderation evaluation (Admin only)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Aggregate false-positive and false-negative metrics.',
+  })
+  @ApiResponse({ status: 400, description: 'Invalid evaluation filters.' })
+  async runLanguageEvaluation(@Body() dto: RunEvaluationDto) {
+    return this.languageEvaluationService.runEvaluation(dto);
+  }
+
+  @Post('policy-impact-preview')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Preview moderation threshold impact using local synthetic fixtures',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Aggregate-only impact preview and one-time approval ID.',
+  })
+  @ApiResponse({ status: 400, description: 'Invalid proposed thresholds.' })
+  previewPolicyImpact(@Body() dto: PolicyImpactThresholdsDto) {
+    return this.languageEvaluationService.previewPolicyImpact(dto);
+  }
 
   @Get('pending')
   @ApiOperation({ summary: 'Get pending moderation reviews (Admin only)' })
@@ -114,14 +144,28 @@ export class ModerationController {
 
   @Post('config/thresholds')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Update moderation thresholds (Admin only)' })
-  @ApiResponse({ status: 200, description: 'Thresholds updated.' })
-  updateThresholds(@Body() dto: UpdateThresholdsDto) {
-    this.aiModerationService.updateThresholds(
-      dto.highThreshold,
-      dto.mediumThreshold,
-    );
-    return { message: 'Thresholds updated successfully' };
+  @ApiOperation({
+    summary: 'Apply a previewed moderation threshold change after explicit approval',
+  })
+  @ApiResponse({ status: 200, description: 'Approved thresholds applied.' })
+  @ApiResponse({
+    status: 403,
+    description: 'Explicit approval is required.',
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'The preview is missing, expired, stale, or mismatched.',
+  })
+  updateThresholds(@Body() dto: ApprovePolicyImpactDto) {
+    const thresholds = this.languageEvaluationService.approvePolicyImpact({
+      previewId: dto.previewId,
+      approved: dto.approved,
+      proposedThresholds: {
+        highThreshold: dto.highThreshold,
+        mediumThreshold: dto.mediumThreshold,
+      },
+    });
+    return { message: 'Approved thresholds applied successfully', thresholds };
   }
 
   @Post('test')

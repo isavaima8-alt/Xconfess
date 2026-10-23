@@ -1,8 +1,11 @@
+import * as crypto from 'crypto';
 import {
   Inject,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
+  BadRequestException,
+  ForbiddenException,
   Logger,
   forwardRef,
   HttpStatus,
@@ -31,6 +34,7 @@ import { ErrorCode } from '../common/errors/error-codes';
 import { AnalyticsEventService } from '../analytics/analytics-event.service';
 import { Cache } from 'cache-manager';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { DataExportService } from '../data-export/data-export.service';
 
 /**
  * Cache namespaces that hold personalization-derived discovery results for a
@@ -53,6 +57,7 @@ export class UserService {
     @Inject(forwardRef(() => EmailService))
     private emailService: EmailService,
     private readonly configService: ConfigService,
+    private readonly dataExportService: DataExportService,
     @Optional()
     private readonly analyticsEventService?: AnalyticsEventService,
     @Optional()
@@ -274,7 +279,12 @@ export class UserService {
     if (!user) throw new NotFoundException('User not found');
 
     user.is_active = false;
-    return this.userRepository.save(user);
+    const savedUser = await this.userRepository.save(user);
+    await this.dataExportService.cancelExportsForUser(
+      String(userId),
+      'account_deactivated',
+    );
+    return savedUser;
   }
 
   async reactivateAccount(userId: number): Promise<User> {
@@ -282,12 +292,21 @@ export class UserService {
     if (!user) throw new NotFoundException('User not found');
 
     user.is_active = true;
-    return this.userRepository.save(user);
+    const savedUser = await this.userRepository.save(user);
+    await this.dataExportService.cancelExportsForUser(
+      String(userId),
+      'account_reactivated',
+    );
+    return savedUser;
   }
 
   async deleteAccount(userId: number): Promise<void> {
     const user = await this.findById(userId);
     if (!user) throw new NotFoundException('User not found');
+    await this.dataExportService.cancelExportsForUser(
+      String(userId),
+      'account_deleted',
+    );
     await this.userRepository.remove(user);
   }
 
@@ -355,6 +374,70 @@ export class UserService {
     }
   }
 
+  normalizeRecoveryCode(code: string): string {
+    return code.trim().replace(/\s+/g, '').toUpperCase();
+  }
+
+  hashRecoveryCode(code: string): string {
+    return CryptoUtil.hash(this.normalizeRecoveryCode(code));
+  }
+
+  generateRecoveryCodes(count = 10, codeLength = 16): string[] {
+    if (!Number.isInteger(count) || count <= 0) {
+      return [];
+    }
+
+    return Array.from({ length: count }, () => {
+      const raw = crypto.randomBytes(Math.max(8, Math.ceil(codeLength / 2))).toString('hex');
+      return raw.slice(0, codeLength).toUpperCase();
+    });
+  }
+
+  async storeRecoveryCodes(userId: number, codes: string[]): Promise<string[]> {
+    const user = await this.findById(userId);
+    if (!user) throw new NotFoundException('User not found');
+
+    const uniqueVerifiers = Array.from(
+      new Set(codes.map((code) => this.hashRecoveryCode(code))),
+    );
+    const enc = CryptoUtil.encrypt(JSON.stringify(uniqueVerifiers));
+    user.recoveryCodesEncrypted = enc.encrypted;
+    user.recoveryCodesIv = enc.iv;
+    user.recoveryCodesTag = enc.tag;
+
+    try {
+      await this.userRepository.save(user);
+      return codes;
+    } catch (e) {
+      throw new InternalServerErrorException('Failed to store recovery codes');
+    }
+  }
+
+  async regenerateRecoveryCodes(userId: number): Promise<string[]> {
+    const user = await this.findById(userId);
+    if (!user) throw new NotFoundException('User not found');
+    if (!user.totpEnabled) {
+      throw new BadRequestException(
+        'Authenticator-based two-factor authentication must be enabled first',
+      );
+    }
+
+    const codes = this.generateRecoveryCodes();
+    const verifiers = Array.from(
+      new Set(codes.map((code) => this.hashRecoveryCode(code))),
+    );
+    const enc = CryptoUtil.encrypt(JSON.stringify(verifiers));
+    user.recoveryCodesEncrypted = enc.encrypted;
+    user.recoveryCodesIv = enc.iv;
+    user.recoveryCodesTag = enc.tag;
+    try {
+      await this.userRepository.save(user);
+    } catch {
+      throw new InternalServerErrorException('Failed to regenerate recovery codes');
+    }
+    return codes;
+  }
+
   async setRecoveryCodes(userId: number, encrypted: string, iv: string, tag: string): Promise<void> {
     const user = await this.findById(userId);
     if (!user) throw new NotFoundException('User not found');
@@ -368,39 +451,71 @@ export class UserService {
     }
   }
 
-  async consumeRecoveryCode(userId: number, code: string): Promise<boolean> {
+  async revokeRecoveryCodes(userId: number): Promise<void> {
     const user = await this.findById(userId);
     if (!user) throw new NotFoundException('User not found');
-    if (!user.recoveryCodesEncrypted) return false;
 
-    const { CryptoUtil } = require('../common/crypto.util');
-    let codes: string[] = [];
-    try {
-      const decrypted = CryptoUtil.decrypt(
-        user.recoveryCodesEncrypted,
-        user.recoveryCodesIv || '',
-        user.recoveryCodesTag || '',
-      );
-      codes = JSON.parse(decrypted) as string[];
-    } catch (e) {
-      return false;
-    }
-
-    const idx = codes.indexOf(code);
-    if (idx === -1) return false;
-
-    codes.splice(idx, 1);
+    user.recoveryCodesEncrypted = null;
+    user.recoveryCodesIv = null;
+    user.recoveryCodesTag = null;
 
     try {
-      const enc = CryptoUtil.encrypt(JSON.stringify(codes));
-      user.recoveryCodesEncrypted = enc.encrypted;
-      user.recoveryCodesIv = enc.iv;
-      user.recoveryCodesTag = enc.tag;
       await this.userRepository.save(user);
-      return true;
     } catch (e) {
+      throw new InternalServerErrorException('Failed to revoke recovery codes');
+    }
+  }
+
+  async consumeRecoveryCode(userId: number, code: string): Promise<boolean> {
+    const normalized = this.normalizeRecoveryCode(code);
+    if (!normalized) {
       return false;
     }
+
+    const hashedCode = this.hashRecoveryCode(normalized);
+
+    const runConsume = async (repo: Pick<Repository<User>, 'findOne' | 'save'>, useLock = false) => {
+      const user = await repo.findOne(User, {
+        where: { id: userId },
+        ...(useLock ? { lock: { mode: 'pessimistic_write' } } : {}),
+      } as any);
+
+      if (!user || !user.recoveryCodesEncrypted) {
+        return false;
+      }
+
+      try {
+        const decrypted = CryptoUtil.decrypt(
+          user.recoveryCodesEncrypted,
+          user.recoveryCodesIv || '',
+          user.recoveryCodesTag || '',
+        );
+        const verifiers = JSON.parse(decrypted) as string[];
+        const index = verifiers.findIndex((entry) => entry === hashedCode);
+
+        if (index === -1) {
+          return false;
+        }
+
+        verifiers.splice(index, 1);
+        const enc = CryptoUtil.encrypt(JSON.stringify(verifiers));
+        user.recoveryCodesEncrypted = enc.encrypted;
+        user.recoveryCodesIv = enc.iv;
+        user.recoveryCodesTag = enc.tag;
+        await repo.save(user);
+        return true;
+      } catch (e) {
+        return false;
+      }
+    };
+
+    if (this.userRepository.manager && typeof this.userRepository.manager.transaction === 'function') {
+      return this.userRepository.manager.transaction(async (manager) =>
+        runConsume(manager as any, true),
+      );
+    }
+
+    return runConsume(this.userRepository);
   }
 
   async getProfileSummary(userId: number, page = 1, limit = 10): Promise<any> {
@@ -635,6 +750,10 @@ export class UserService {
     };
 
     await this.userRepository.save(user);
+    await this.dataExportService.cancelExportsForUser(
+      String(userId),
+      'privacy_settings_changed',
+    );
 
     await this.enforcePrivacyPolicies(user);
 
@@ -842,6 +961,14 @@ export class UserService {
     userId: number,
     dto: Record<string, any>,
   ): Promise<User> {
+    const allowedKeys = new Set(['privacySettings', 'notificationPreferences']);
+    const unsupportedKeys = Object.keys(dto).filter(
+      (key) => !allowedKeys.has(key),
+    );
+    if (unsupportedKeys.length > 0) {
+      throw new BadRequestException('Unsupported account setting');
+    }
+
     const user = await this.findById(userId);
     if (!user) throw new NotFoundException('User not found');
 
@@ -859,17 +986,13 @@ export class UserService {
       };
     }
 
-    for (const key of Object.keys(dto)) {
-      if (
-        key !== 'privacySettings' &&
-        key !== 'notificationPreferences' &&
-        key in user
-      ) {
-        (user as any)[key] = dto[key];
-      }
-    }
-
     await this.userRepository.save(user);
+    if (dto.privacySettings || dto.personalizationEnabled !== undefined) {
+      await this.dataExportService.cancelExportsForUser(
+        String(userId),
+        'privacy_settings_changed',
+      );
+    }
     await this.enforcePrivacyPolicies(user);
     return user;
   }
@@ -913,6 +1036,11 @@ export class UserService {
       );
     }
 
+    await this.dataExportService.cancelExportsForUser(
+      String(userId),
+      'privacy_settings_changed',
+    );
+
     await this.invalidatePersonalizationCache(userId);
 
     this.logger.debug(
@@ -950,7 +1078,185 @@ export class UserService {
     );
   }
 
-  async getPublicProfile(userId: string | number): Promise<any> {
+  // =========================
+  // 🚫 BLOCK & MUTE PREFERENCES
+  // =========================
+
+  async getBlockMutePreferences(userId: number): Promise<{
+    blockedUserIds: number[];
+    mutedUserIds: number[];
+  }> {
+    const user = await this.findById(userId);
+    if (!user) throw new NotFoundException('User not found');
+
+    return {
+      blockedUserIds: user.getBlockedUserIds(),
+      mutedUserIds: user.getMutedUserIds(),
+    };
+  }
+
+  async blockUser(
+    userId: number,
+    targetUserId: number,
+  ): Promise<{ success: boolean; precedence: string; blockedUserIds: number[] }> {
+    if (userId === targetUserId) {
+      throw new BadRequestException('Cannot block yourself');
+    }
+    const target = await this.findById(targetUserId);
+    if (!target) {
+      throw new NotFoundException('User to block not found');
+    }
+    const user = await this.findById(userId);
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const currentBlocked = new Set(user.getBlockedUserIds());
+    currentBlocked.add(targetUserId);
+
+    // If target was muted, remove from mute list since block has higher precedence
+    const currentMuted = user.getMutedUserIds().filter((id) => id !== targetUserId);
+
+    user.privacySettings = {
+      ...(user.privacySettings || {
+        isDiscoverable: true,
+        canReceiveReplies: true,
+        showReactions: true,
+      }),
+      blockedUserIds: Array.from(currentBlocked),
+      mutedUserIds: currentMuted,
+    };
+
+    await this.userRepository.save(user);
+    await this.invalidateCrossSurfaceCaches(userId);
+
+    return {
+      success: true,
+      precedence: 'block',
+      blockedUserIds: user.getBlockedUserIds(),
+    };
+  }
+
+  async unblockUser(
+    userId: number,
+    targetUserId: number,
+  ): Promise<{ success: boolean; precedence: string; blockedUserIds: number[] }> {
+    if (userId === targetUserId) {
+      throw new BadRequestException('Invalid target user');
+    }
+    const user = await this.findById(userId);
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const currentBlocked = user.getBlockedUserIds().filter((id) => id !== targetUserId);
+
+    user.privacySettings = {
+      ...(user.privacySettings || {
+        isDiscoverable: true,
+        canReceiveReplies: true,
+        showReactions: true,
+      }),
+      blockedUserIds: currentBlocked,
+    };
+
+    await this.userRepository.save(user);
+    await this.invalidateCrossSurfaceCaches(userId);
+
+    return {
+      success: true,
+      precedence: user.getRelationshipPrecedence(targetUserId),
+      blockedUserIds: user.getBlockedUserIds(),
+    };
+  }
+
+  async muteUser(
+    userId: number,
+    targetUserId: number,
+  ): Promise<{ success: boolean; precedence: string; mutedUserIds: number[] }> {
+    if (userId === targetUserId) {
+      throw new BadRequestException('Cannot mute yourself');
+    }
+    const target = await this.findById(targetUserId);
+    if (!target) {
+      throw new NotFoundException('User to mute not found');
+    }
+    const user = await this.findById(userId);
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const currentMuted = new Set(user.getMutedUserIds());
+    currentMuted.add(targetUserId);
+
+    user.privacySettings = {
+      ...(user.privacySettings || {
+        isDiscoverable: true,
+        canReceiveReplies: true,
+        showReactions: true,
+      }),
+      mutedUserIds: Array.from(currentMuted),
+    };
+
+    await this.userRepository.save(user);
+    await this.invalidateCrossSurfaceCaches(userId);
+
+    return {
+      success: true,
+      precedence: user.getRelationshipPrecedence(targetUserId),
+      mutedUserIds: user.getMutedUserIds(),
+    };
+  }
+
+  async unmuteUser(
+    userId: number,
+    targetUserId: number,
+  ): Promise<{ success: boolean; precedence: string; mutedUserIds: number[] }> {
+    if (userId === targetUserId) {
+      throw new BadRequestException('Invalid target user');
+    }
+    const user = await this.findById(userId);
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const currentMuted = user.getMutedUserIds().filter((id) => id !== targetUserId);
+
+    user.privacySettings = {
+      ...(user.privacySettings || {
+        isDiscoverable: true,
+        canReceiveReplies: true,
+        showReactions: true,
+      }),
+      mutedUserIds: currentMuted,
+    };
+
+    await this.userRepository.save(user);
+    await this.invalidateCrossSurfaceCaches(userId);
+
+    return {
+      success: true,
+      precedence: user.getRelationshipPrecedence(targetUserId),
+      mutedUserIds: user.getMutedUserIds(),
+    };
+  }
+
+  async invalidateCrossSurfaceCaches(userId: number): Promise<void> {
+    await this.invalidatePersonalizationCache(userId);
+    if (this.cacheManager) {
+      try {
+        await this.cacheManager.del(`confessions:user:${userId}`);
+        await this.cacheManager.del(`feed:user:${userId}`);
+      } catch (err) {
+        this.logger.warn(`Failed to clear cross surface cache for user ${userId}: ${err}`);
+      }
+    }
+  }
+
+  async getPublicProfile(
+    userId: string | number,
+    requestingUserId?: number,
+  ): Promise<any> {
     const numericId = typeof userId === 'string' ? parseInt(userId, 10) : userId;
     if (isNaN(numericId)) {
       throw new NotFoundException('User not found');
@@ -958,6 +1264,20 @@ export class UserService {
     const user = await this.findById(numericId);
     if (!user) {
       throw new NotFoundException('User not found');
+    }
+
+    let isMuted = false;
+    if (requestingUserId && requestingUserId !== numericId) {
+      const requestingUser = await this.findById(requestingUserId);
+      if (requestingUser) {
+        // Precedence: Block > Mute > Allow
+        if (requestingUser.isUserBlocked(numericId) || user.isUserBlocked(requestingUserId)) {
+          throw new ForbiddenException(
+            'This profile is unavailable because of account blocking preferences.',
+          );
+        }
+        isMuted = requestingUser.isUserMuted(numericId);
+      }
     }
 
     const anonRows = await this.userRepository.manager.query(
@@ -1002,12 +1322,14 @@ export class UserService {
     const badges = this.buildReputationBadges(stats.confessions);
 
     return {
+      id: user.id,
       displayName: user.username,
       username: user.username,
       avatar: null,
       createdAt: user.createdAt,
       stats,
       badges,
+      isMuted,
     };
   }
 }

@@ -158,17 +158,19 @@ export default function ReportDetail({
 
   const confirmDelete = () => {
     openConfirmation({
-      title: 'Delete confession?',
-      description: 'This action cannot be undone. The confession will be permanently deleted.',
-      confirmLabel: 'Delete',
+      title: 'Request confession deletion?',
+      description:
+        'This submits a deletion request. A different administrator must approve it before the confession is deleted.',
+      confirmLabel: 'Submit request',
       variant: 'danger',
       action: () =>
-        adminApi.deleteConfession(
+        adminApi.requestConfessionDeletion(
           report.confessionId,
-          'Deleted via report resolution',
+          resolutionNotes || 'Deletion requested via report resolution',
         ),
-      successMessage: 'Confession deleted successfully',
-      errorMessage: 'Failed to delete confession',
+      successMessage:
+        'Deletion request submitted. Another administrator must approve it before the confession is deleted.',
+      errorMessage: 'Failed to submit deletion request',
       onSuccess: () => {
         onBack();
       },

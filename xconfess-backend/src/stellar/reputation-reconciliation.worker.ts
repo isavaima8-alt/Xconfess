@@ -6,6 +6,12 @@ import { ConfigService } from '@nestjs/config';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Tip, TipVerificationStatus } from '../tipping/entities/tip.entity';
 import { AnonymousConfession } from '../confession/entities/confession.entity';
+import { ReputationReconciliationCheckpoint } from './entities/reputation-reconciliation-checkpoint.entity';
+
+const CHECKPOINT_WORKER_NAME = 'reputation-reconciliation';
+const DEFAULT_BATCH_SIZE = 100;
+const MAX_BATCH_SIZE = 500;
+const CHECKPOINT_ERROR_CODE = 'BATCH_PROCESSING_FAILED';
 
 export interface ReputationDiscrepancy {
   confessionId: string;
@@ -29,19 +35,25 @@ export class ReputationReconciliationWorker {
   private readonly logger = new Logger(ReputationReconciliationWorker.name);
   private readonly batchSize: number;
   private readonly horizonUrl: string;
+  private running = false;
 
   constructor(
     @InjectRepository(Tip)
     private readonly tipRepository: Repository<Tip>,
     @InjectRepository(AnonymousConfession)
     private readonly confessionRepository: Repository<AnonymousConfession>,
+    @InjectRepository(ReputationReconciliationCheckpoint)
+    private readonly checkpointRepository: Repository<ReputationReconciliationCheckpoint>,
     private readonly configService: ConfigService,
     private readonly eventEmitter: EventEmitter2,
   ) {
-    this.batchSize = parseInt(
+    const configuredBatchSize = Number.parseInt(
       this.configService.get<string>('REPUTATION_RECONCILIATION_BATCH_SIZE', '100'),
       10,
     );
+    this.batchSize = Number.isFinite(configuredBatchSize)
+      ? Math.min(Math.max(configuredBatchSize, 1), MAX_BATCH_SIZE)
+      : DEFAULT_BATCH_SIZE;
     this.horizonUrl = this.configService.get<string>(
       'STELLAR_HORIZON_URL',
       'https://horizon-testnet.stellar.org',
@@ -50,51 +62,143 @@ export class ReputationReconciliationWorker {
 
   @Cron(process.env.REPUTATION_RECONCILIATION_INTERVAL || '*/30 * * * *')
   async reconcileReputationScores(): Promise<void> {
-    this.logger.log('Starting reputation reconciliation run');
-
-    // Fetch confessions that have received at least one verified tip
-    const confessionsWithTips = await this.confessionRepository
-      .createQueryBuilder('c')
-      .innerJoin('tips', 't', 't.confession_id = c.id')
-      .where('t.verification_status = :status', { status: TipVerificationStatus.VERIFIED })
-      .select('c.id', 'id')
-      .groupBy('c.id')
-      .limit(this.batchSize)
-      .getRawMany<{ id: string }>();
-
-    if (confessionsWithTips.length === 0) {
-      this.logger.debug('No confessions with verified tips found; nothing to reconcile');
+    if (this.configService.get<string>('ENABLE_BACKGROUND_JOBS') !== 'true') {
+      this.logger.warn({
+        event: 'reputation_reconciliation_skipped',
+        reason: 'background_jobs_disabled',
+      });
+      this.emitSafely('reputation.reconciliation.progress', {
+        status: 'skipped',
+        reason: 'background_jobs_disabled',
+        processedCount: 0,
+        timestamp: new Date(),
+      });
       return;
     }
 
-    this.logger.log(
-      `Reconciling reputation for ${confessionsWithTips.length} confessions`,
-    );
+    if (this.running) return;
+    this.running = true;
 
-    const discrepancies: ReputationDiscrepancy[] = [];
-
-    for (const { id: confessionId } of confessionsWithTips) {
-      const discrepancy = await this.checkConfession(confessionId);
-      if (discrepancy) {
-        discrepancies.push(discrepancy);
+    try {
+      let checkpoint = await this.checkpointRepository.findOne({
+        where: { workerName: CHECKPOINT_WORKER_NAME },
+      });
+      if (!checkpoint) {
+        checkpoint = this.checkpointRepository.create({
+          workerName: CHECKPOINT_WORKER_NAME,
+          lastConfessionId: null,
+          status: 'idle',
+          processedCount: 0,
+          lastBatchSize: 0,
+          lastErrorCode: null,
+          lastStartedAt: null,
+          lastCompletedAt: null,
+        });
+        checkpoint = await this.checkpointRepository.save(checkpoint);
       }
+
+      if (checkpoint.status === 'complete') {
+        checkpoint.processedCount = 0;
+        checkpoint.lastConfessionId = null;
+      }
+      checkpoint.status = 'running';
+      checkpoint.lastErrorCode = null;
+      checkpoint.lastStartedAt = new Date();
+      await this.checkpointRepository.save(checkpoint);
+
+      const query = this.confessionRepository
+        .createQueryBuilder('c')
+        .innerJoin('tips', 't', 't.confession_id = c.id')
+        .where('t.verification_status = :status', {
+          status: TipVerificationStatus.VERIFIED,
+        });
+      if (checkpoint.lastConfessionId) {
+        query.andWhere('c.id > :lastConfessionId', {
+          lastConfessionId: checkpoint.lastConfessionId,
+        });
+      }
+      const confessionsWithTips = await query
+        .select('c.id', 'id')
+        .groupBy('c.id')
+        .orderBy('c.id', 'ASC')
+        .limit(this.batchSize)
+        .getRawMany<{ id: string }>();
+
+      const discrepancies: ReputationDiscrepancy[] = [];
+      for (const { id: confessionId } of confessionsWithTips) {
+        const discrepancy = await this.checkConfession(confessionId);
+        if (discrepancy) discrepancies.push(discrepancy);
+      }
+
+      const finished = confessionsWithTips.length < this.batchSize;
+      checkpoint.lastConfessionId = finished
+        ? null
+        : confessionsWithTips[confessionsWithTips.length - 1].id;
+      checkpoint.status = finished ? 'complete' : 'in_progress';
+      checkpoint.processedCount += confessionsWithTips.length;
+      checkpoint.lastBatchSize = confessionsWithTips.length;
+      checkpoint.lastCompletedAt = finished ? new Date() : checkpoint.lastCompletedAt;
+      await this.checkpointRepository.save(checkpoint);
+
+      if (discrepancies.length > 0) {
+        this.emitSafely('reputation.reconciliation.discrepancies', {
+          count: discrepancies.length,
+          discrepancies,
+          timestamp: new Date(),
+        });
+      }
+
+      this.logger.log({
+        event: 'reputation_reconciliation_progress',
+        status: checkpoint.status,
+        batchSize: confessionsWithTips.length,
+        processedCount: checkpoint.processedCount,
+        discrepancyCount: discrepancies.length,
+      });
+      this.emitSafely('reputation.reconciliation.progress', {
+        status: checkpoint.status,
+        batchSize: confessionsWithTips.length,
+        processedCount: checkpoint.processedCount,
+        discrepancyCount: discrepancies.length,
+        timestamp: new Date(),
+      });
+    } catch {
+      try {
+        const checkpoint = await this.checkpointRepository.findOne({
+          where: { workerName: CHECKPOINT_WORKER_NAME },
+        });
+        if (checkpoint) {
+          checkpoint.status = 'failed';
+          checkpoint.lastErrorCode = CHECKPOINT_ERROR_CODE;
+          await this.checkpointRepository.save(checkpoint);
+        }
+      } catch {
+        // Keep failure reporting independent from checkpoint storage availability.
+      }
+      this.logger.error({
+        event: 'reputation_reconciliation_failed',
+        errorCode: CHECKPOINT_ERROR_CODE,
+      });
+      this.emitSafely('reputation.reconciliation.failure', {
+        errorCode: CHECKPOINT_ERROR_CODE,
+        timestamp: new Date(),
+      });
+      throw new Error(CHECKPOINT_ERROR_CODE);
+    } finally {
+      this.running = false;
     }
+  }
 
-    if (discrepancies.length === 0) {
-      this.logger.log('Reputation reconciliation complete — no discrepancies found');
-      return;
+  private emitSafely(eventName: string, payload: Record<string, unknown>): void {
+    try {
+      this.eventEmitter.emit(eventName, payload);
+    } catch {
+      this.logger.warn({
+        event: 'reputation_reconciliation_event_delivery_failed',
+        eventName,
+        errorCode: 'EVENT_DELIVERY_FAILED',
+      });
     }
-
-    this.logger.warn(
-      `Reputation discrepancies detected for ${discrepancies.length} confession(s)`,
-      { discrepancies },
-    );
-
-    this.eventEmitter.emit('reputation.reconciliation.discrepancies', {
-      count: discrepancies.length,
-      discrepancies,
-      timestamp: new Date(),
-    });
   }
 
   private async checkConfession(
@@ -130,15 +234,6 @@ export class ReputationReconciliationWorker {
       return null;
     }
 
-    this.logger.warn({
-      event: 'reputation_score_drift',
-      confessionId,
-      onChainTipCount,
-      dbVerifiedTipCount,
-      onChainTotalXlm,
-      dbTotalXlm,
-    });
-
     return {
       confessionId,
       onChainTipCount,
@@ -167,7 +262,6 @@ export class ReputationReconciliationWorker {
       if (resp.status === 404) {
         this.logger.warn({
           event: 'reputation_tx_not_found',
-          txId,
           message: 'Transaction not found on Horizon — possible reorg or pruning',
         });
         return null;
@@ -176,7 +270,6 @@ export class ReputationReconciliationWorker {
       if (!resp.ok) {
         this.logger.warn({
           event: 'reputation_horizon_error',
-          txId,
           httpStatus: resp.status,
         });
         return null;
@@ -189,8 +282,7 @@ export class ReputationReconciliationWorker {
     } catch (err: any) {
       this.logger.warn({
         event: 'reputation_horizon_fetch_error',
-        txId,
-        error: err instanceof Error ? err.message : String(err),
+        errorCode: 'HORIZON_FETCH_FAILED',
       });
       return null;
     }

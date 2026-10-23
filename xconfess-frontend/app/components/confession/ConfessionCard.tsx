@@ -24,6 +24,8 @@ export const ConfessionCard = memo(({ confession }: Props) => {
     confession.tipStats || null
   );
   const [showWarnedContent, setShowWarnedContent] = useState(false);
+  const [avatarError, setAvatarError] = useState(false);
+  const [mediaError, setMediaError] = useState(false);
 
   useEffect(() => {
     if (!tipStats) {
@@ -66,23 +68,29 @@ export const ConfessionCard = memo(({ confession }: Props) => {
     >
       <div className="mb-3 flex items-center justify-between gap-3 border-b border-[var(--border)] pb-3 sm:mb-4">
         <div className="flex min-w-0 items-center gap-3">
-          {confession.author?.avatar ? (
-            <Image
-              src={confession.author.avatar}
-              alt=""
-              width={44}
-              height={44}
-              className="rounded-xl border border-[var(--border)] bg-[var(--skeleton)] object-cover"
-              loading="lazy"
-            />
-          ) : (
-            <div
-              className="flex h-11 w-11 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--accent-soft)] text-sm font-semibold text-[var(--primary-deep)]"
-              aria-hidden="true"
-            >
-              A
-            </div>
-          )}
+          <div
+            className="relative h-11 w-11 min-h-[44px] min-w-[44px] shrink-0 overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface-muted)] aspect-square"
+            data-testid="avatar-geometry-box"
+          >
+            {confession.author?.avatar && !avatarError ? (
+              <Image
+                src={confession.author.avatar}
+                alt=""
+                width={44}
+                height={44}
+                className="h-full w-full object-cover"
+                loading="lazy"
+                onError={() => setAvatarError(true)}
+              />
+            ) : (
+              <div
+                className="flex h-full w-full items-center justify-center bg-[var(--accent-soft)] text-sm font-semibold text-[var(--primary-deep)]"
+                aria-hidden="true"
+              >
+                {authorName.charAt(0).toUpperCase() || "A"}
+              </div>
+            )}
+          </div>
 
           <div>
             <p className="truncate font-editorial text-xl text-[var(--foreground)] sm:text-2xl">
@@ -121,15 +129,37 @@ export const ConfessionCard = memo(({ confession }: Props) => {
           </div>
         </div>
       ) : (
-        <ScrollRestorationLink
-          href={`/confessions/${confession.id}`}
-          className="group block rounded-lg p-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]"
-          aria-label={`Read full confession: ${confession.content.slice(0, 80)}...`}
-        >
-          <p className="mb-3 font-editorial text-[1.35rem] leading-[1.42] text-[var(--foreground)] transition-colors group-hover:text-[var(--primary-deep)] sm:mb-4 sm:text-[1.65rem]">
-            {confession.content}
-          </p>
-        </ScrollRestorationLink>
+        <div className="min-w-0">
+          <ScrollRestorationLink
+            href={`/confessions/${confession.id}`}
+            className="group block rounded-lg p-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]"
+            aria-label={`Read full confession: ${confession.content.slice(0, 80)}...`}
+          >
+            <p className="mb-3 font-editorial text-[1.35rem] leading-[1.42] text-[var(--foreground)] transition-colors group-hover:text-[var(--primary-deep)] sm:mb-4 sm:text-[1.65rem] break-words">
+              {confession.content}
+            </p>
+          </ScrollRestorationLink>
+
+          {confession.mediaUrl && !mediaError && (
+            <div
+              className="relative my-3 w-full overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface-muted)]"
+              style={{
+                aspectRatio: `${confession.mediaAspectRatio || 16 / 9}`,
+              }}
+              data-testid="media-geometry-box"
+            >
+              <Image
+                src={confession.mediaUrl}
+                alt="Confession media attachment"
+                fill
+                sizes="(max-width: 768px) 100vw, 768px"
+                className="object-cover transition-opacity duration-200"
+                loading="lazy"
+                onError={() => setMediaError(true)}
+              />
+            </div>
+          )}
+        </div>
       )}
 
       <div className="mt-3 flex flex-col gap-3 border-t border-[var(--border)] pt-3 sm:mt-4 sm:flex-row sm:items-center sm:justify-between">

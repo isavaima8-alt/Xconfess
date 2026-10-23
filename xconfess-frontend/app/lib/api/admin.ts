@@ -136,6 +136,22 @@ export interface ReportStats {
   resolvedTodayCount: number;
 }
 
+export interface AdminActionApproval {
+  id: string;
+  action: 'confession.delete';
+  targetId: string;
+  requestedById: number;
+  approvedById: number | null;
+  status: 'pending' | 'executed' | 'cancelled' | 'expired';
+  reason: string;
+  requestedAt: string;
+  expiresAt: string;
+  approvedAt: string | null;
+  executedAt: string | null;
+  cancelledAt: string | null;
+  expiredAt: string | null;
+}
+
 export interface SystemHealthResponse {
   status: 'ok' | 'error';
   details?: Record<string, { status: string; [key: string]: any }>;
@@ -148,7 +164,11 @@ export const adminApi = {
     return response.data;
   },
 
-  requestStepUp: async (payload: { password?: string; totpToken?: string }) => {
+  requestStepUp: async (payload: {
+    password?: string;
+    totpToken?: string;
+    recoveryCode?: string;
+  }) => {
     const response = await apiClient.post('/api/auth/step-up', payload);
     return response.data as { stepUpToken: string; expiresIn: number };
   },
@@ -200,12 +220,42 @@ export const adminApi = {
   },
 
 
-  // Destructive actions require a recent step-up proof (see requestStepUp).
-  deleteConfession: async (id: string, reason?: string, stepUpToken?: string) => {
-    const response = await apiClient.delete(`/api/admin/confessions/${id}`, {
-      data: { reason },
-      headers: stepUpHeader(stepUpToken),
-    });
+  // High-impact actions require step-up proof and independent approval.
+  requestConfessionDeletion: async (
+    id: string,
+    reason: string,
+  ) => {
+    const response = await apiClient.post(
+      '/api/admin/action-approvals',
+      { action: 'confession.delete', targetId: id, reason },
+    );
+    return response.data as AdminActionApproval;
+  },
+
+  getPendingActionApprovals: async () => {
+    const response = await apiClient.get('/api/admin/action-approvals');
+    return response.data as AdminActionApproval[];
+  },
+
+  approveActionApproval: async (id: string, stepUpToken?: string) => {
+    const response = await apiClient.post(
+      `/api/admin/action-approvals/${id}/approve`,
+      {},
+      { headers: stepUpHeader(stepUpToken) },
+    );
+    return response.data as AdminActionApproval;
+  },
+
+  cancelActionApproval: async (
+    id: string,
+    reason?: string,
+    stepUpToken?: string,
+  ) => {
+    const response = await apiClient.post(
+      `/api/admin/action-approvals/${id}/cancel`,
+      { reason },
+      { headers: stepUpHeader(stepUpToken) },
+    );
     return response.data;
   },
 

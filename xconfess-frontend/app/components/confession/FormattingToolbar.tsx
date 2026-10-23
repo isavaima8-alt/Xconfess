@@ -129,7 +129,7 @@ export const FormattingToolbar: React.FC<FormattingToolbarProps> = ({
   return (
     <>
       <div
-        className="flex items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-1 overflow-x-auto"
+        className="flex flex-wrap items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-1.5 min-w-0 max-w-full"
         role="toolbar"
         aria-label="Text formatting"
       >
@@ -140,7 +140,7 @@ export const FormattingToolbar: React.FC<FormattingToolbarProps> = ({
           onClick={handleBold}
           aria-label="Bold"
           title="Bold (Ctrl+B)"
-          className="h-8 w-8 p-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          className="h-9 w-9 p-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           <Bold className="h-4 w-4" aria-hidden="true" />
         </Button>
@@ -151,7 +151,7 @@ export const FormattingToolbar: React.FC<FormattingToolbarProps> = ({
           onClick={handleItalic}
           aria-label="Italic"
           title="Italic (Ctrl+I)"
-          className="h-8 w-8 p-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          className="h-9 w-9 p-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           <Italic className="h-4 w-4" aria-hidden="true" />
         </Button>
@@ -162,7 +162,7 @@ export const FormattingToolbar: React.FC<FormattingToolbarProps> = ({
           onClick={handleLink}
           aria-label="Insert link"
           title="Insert link"
-          className="h-8 w-8 p-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          className="h-9 w-9 p-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           <Link className="h-4 w-4" aria-hidden="true" />
         </Button>
@@ -177,24 +177,24 @@ export const FormattingToolbar: React.FC<FormattingToolbarProps> = ({
             aria-expanded={isEmojiPickerOpen}
             aria-haspopup="true"
             title="Insert emoji"
-            className="h-8 w-8 p-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+            className="h-9 w-9 p-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             <Smile className="h-4 w-4" aria-hidden="true" />
           </Button>
           {isEmojiPickerOpen && (
             <div
               ref={emojiPickerRef}
-              className="absolute left-0 top-full z-50 mt-2 rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-2 shadow-xl"
+              className="absolute left-0 top-full z-50 mt-2 max-w-[min(18rem,calc(100vw-3rem))] max-h-56 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] p-2 shadow-xl"
               role="region"
               aria-label="Emoji picker"
             >
-              <div className="grid grid-cols-8 gap-1">
+              <div className="grid grid-cols-6 gap-1 sm:grid-cols-8">
                 {COMMON_EMOJIS.map((emoji) => (
                   <button
                     key={emoji}
                     type="button"
                     onClick={() => handleEmojiClick(emoji)}
-                    className="rounded p-1 text-lg hover:bg-[var(--surface-muted)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                    className="flex h-8 w-8 items-center justify-center rounded p-1 text-lg hover:bg-[var(--surface-muted)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                     aria-label={`Insert ${emoji} emoji`}
                   >
                     {emoji}

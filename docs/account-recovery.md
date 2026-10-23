@@ -357,6 +357,10 @@ Passkeys strengthen recovery without weakening the enumeration and anomaly guara
 - **Revocation during recovery**: If recovery is triggered because a device was lost, all passkeys associated with the lost device should be revoked before new credentials are enrolled.
 - **Audit**: Enrollment, assertion, revocation, and recovery-authorization events are recorded with the request ID and derived signal values only. Raw credentials, full IP addresses, and precise locations are never stored.
 
+### Recovery Codes
+
+Recovery codes are a backup path when a user cannot access their authenticator. The service generates high-entropy, single-use codes and stores only SHA-256 verifiers in the database, not the raw plaintext values. Each code is consumed at most once and the verifier set is rewritten immediately after successful use, so a replay cannot succeed under concurrent requests. Regeneration and revocation are explicit administrative actions on the owning account boundary, with failures returning a denied result rather than silently succeeding.
+
 ### Failure Modes
 
 - **Origin mismatch**: The assertion was produced for a different origin. Rejected; the attempt is logged with the request ID.

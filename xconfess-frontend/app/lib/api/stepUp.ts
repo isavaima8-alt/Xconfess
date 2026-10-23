@@ -25,10 +25,10 @@ const STEP_UP_ERROR_CODES: ReadonlySet<string> = new Set(
 );
 
 export interface StepUpCredential {
-  /** Current account password. Provide this OR `totpToken`. */
+  /** Provide exactly one available proof method. */
   password?: string;
-  /** Current TOTP code. Provide this OR `password`. */
   totpToken?: string;
+  recoveryCode?: string;
 }
 
 export interface StepUpProof {

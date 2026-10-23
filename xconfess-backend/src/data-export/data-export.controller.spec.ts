@@ -26,6 +26,7 @@ describe('DataExportController', () => {
       getExportFile: jest.fn(),
       getExportChunk: jest.fn(),
       generateSignedDownloadUrl: jest.fn(),
+      assertCanDeliverExport: jest.fn().mockResolvedValue(undefined),
       validateAndConsumeToken: jest.fn().mockResolvedValue(true),
       invalidateDownloadToken: jest.fn(),
       recordFailedDownloadAttempt: jest.fn().mockResolvedValue(undefined),
@@ -269,7 +270,41 @@ describe('DataExportController', () => {
         userId,
         token,
       );
+      expect(mockExportService.assertCanDeliverExport).toHaveBeenCalledWith(
+        requestId,
+        userId,
+      );
       expect(mockRes.send).toHaveBeenCalled();
+    });
+
+    it('does not consume the token when current authorization has been revoked', async () => {
+      const futureTime = Date.now() + 60 * 60 * 1000;
+      const requestId = 'req-revoked';
+      const userId = 'user-1';
+      const token = 'fresh-token';
+      const { signature } = buildSingleFileParams(
+        requestId,
+        userId,
+        futureTime,
+        token,
+      );
+      mockExportService.assertCanDeliverExport.mockRejectedValue(
+        new NotFoundException('Export snapshot is no longer current.'),
+      );
+
+      await expect(
+        controller.download(
+          requestId,
+          userId,
+          futureTime.toString(),
+          signature,
+          undefined,
+          token,
+          { set: jest.fn(), send: jest.fn() } as any,
+        ),
+      ).rejects.toThrow(NotFoundException);
+
+      expect(mockExportService.validateAndConsumeToken).not.toHaveBeenCalled();
     });
 
     it('should handle chunked download signature validation', async () => {

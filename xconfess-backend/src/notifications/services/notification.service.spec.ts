@@ -117,10 +117,11 @@ describe('NotificationService', () => {
       expect(queueMock.add).toHaveBeenCalledTimes(1);
       expect(queueMock.add).toHaveBeenCalledWith(
         'send-notification',
-        {
+        expect.objectContaining({
           notificationId: 'notif-1',
           userId: 'user-1',
-        },
+          correlationId: expect.any(String),
+        }),
         { jobId: 'email-notif-1' },
       );
     });

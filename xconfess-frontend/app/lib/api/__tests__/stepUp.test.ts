@@ -61,15 +61,15 @@ describe('stepUp API', () => {
   });
 
   describe('adminApi destructive actions attach the step-up proof', () => {
-    it('sends the proof header when deleting a confession', async () => {
-      (apiClient.delete as jest.Mock).mockResolvedValue({ data: {} });
+    it('submits confession deletion as a pending approval request', async () => {
+      (apiClient.post as jest.Mock).mockResolvedValue({ data: {} });
 
-      await adminApi.deleteConfession('c-1', 'spam', 'proof-123');
+      await adminApi.requestConfessionDeletion('c-1', 'spam');
 
-      expect(apiClient.delete).toHaveBeenCalledWith('/api/admin/confessions/c-1', {
-        data: { reason: 'spam' },
-        headers: { [STEP_UP_TOKEN_HEADER]: 'proof-123' },
-      });
+      expect(apiClient.post).toHaveBeenCalledWith(
+        '/api/admin/action-approvals',
+        { action: 'confession.delete', targetId: 'c-1', reason: 'spam' },
+      );
     });
 
     it('sends the proof header when banning a user', async () => {
@@ -84,15 +84,16 @@ describe('stepUp API', () => {
       );
     });
 
-    it('omits the proof header when no token is supplied', async () => {
-      (apiClient.delete as jest.Mock).mockResolvedValue({ data: {} });
+    it('sends the proof header when approving a request', async () => {
+      (apiClient.post as jest.Mock).mockResolvedValue({ data: {} });
 
-      await adminApi.deleteConfession('c-1', 'spam');
+      await adminApi.approveActionApproval('approval-1', 'proof-123');
 
-      expect(apiClient.delete).toHaveBeenCalledWith('/api/admin/confessions/c-1', {
-        data: { reason: 'spam' },
-        headers: undefined,
-      });
+      expect(apiClient.post).toHaveBeenCalledWith(
+        '/api/admin/action-approvals/approval-1/approve',
+        {},
+        { headers: { [STEP_UP_TOKEN_HEADER]: 'proof-123' } },
+      );
     });
   });
 });

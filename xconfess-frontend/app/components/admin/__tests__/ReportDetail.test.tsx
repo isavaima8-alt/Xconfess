@@ -20,7 +20,7 @@ jest.mock('@/app/lib/api/admin', () => ({
   adminApi: {
     resolveReport: jest.fn(),
     dismissReport: jest.fn(),
-    deleteConfession: jest.fn(),
+    requestConfessionDeletion: jest.fn(),
     hideConfession: jest.fn(),
     getAuditLogs: jest.fn().mockResolvedValue({ logs: [] }),
   },

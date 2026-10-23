@@ -5,7 +5,7 @@ services:
     plan: free
     region: oregon
     branch: main
-    buildCommand: npm ci --include=dev --include=optional --no-audit --no-fund && npm run deploy:preflight && npm run build --workspace=xconfess-backend
+    buildCommand: node scripts/check-node-version.js && npm ci --include=dev --include=optional --no-audit --no-fund && npm run deploy:preflight && npm run build --workspace=xconfess-backend
     startCommand: npm run render:prestart && npm run start:prod --workspace=xconfess-backend
     healthCheckPath: /api/health/live
     autoDeploy: true
@@ -20,6 +20,14 @@ services:
         value: https://xconfess-backend.onrender.com
       - key: ENABLE_BACKGROUND_JOBS
         value: true
+      - key: NOTIFICATION_WORKER_CONCURRENCY
+        value: 5
+      - key: EXPORT_WORKER_CONCURRENCY
+        value: 1
+      - key: CONFESSION_DRAFT_WORKER_CONCURRENCY
+        value: 1
+      - key: REDIS_QUEUE_WAIT_THRESHOLD_MS
+        value: 30000
       - key: TYPEORM_SYNCHRONIZE
         value: false
       - key: TYPEORM_ALLOW_PRODUCTION_SYNCHRONIZE

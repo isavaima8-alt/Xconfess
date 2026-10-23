@@ -351,7 +351,7 @@ export const EnhancedConfessionForm: React.FC<EnhancedConfessionFormProps> = ({
           </div>
 
           <div>
-            <div className="mb-3 flex items-center justify-between gap-3">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
               <label
                 htmlFor="confession-body"
                 className="block text-sm font-medium text-[var(--foreground)]"
@@ -359,7 +359,7 @@ export const EnhancedConfessionForm: React.FC<EnhancedConfessionFormProps> = ({
                 Confession <span className="text-red-500" aria-hidden="true">*</span>
                 <span className="sr-only"> (required)</span>
               </label>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <DraftManager
                   currentDraft={{ title, body, gender }}
                   onLoadDraft={handleLoadDraft}
@@ -518,7 +518,7 @@ export const EnhancedConfessionForm: React.FC<EnhancedConfessionFormProps> = ({
             </div>
           )}
 
-          <div className="flex flex-col justify-end gap-3 border-t border-[var(--border)] pt-6 sm:flex-row">
+          <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center justify-end gap-3 border-t border-[var(--border)] pt-6">
             <Button
               type="button"
               variant="ghost"
@@ -531,7 +531,7 @@ export const EnhancedConfessionForm: React.FC<EnhancedConfessionFormProps> = ({
               }}
               disabled={isSubmitting}
               aria-label="Clear draft and reset form"
-              className="min-h-[44px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]"
+              className="min-h-[44px] w-full sm:w-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]"
             >
               Clear draft
             </Button>
@@ -540,7 +540,7 @@ export const EnhancedConfessionForm: React.FC<EnhancedConfessionFormProps> = ({
               disabled={isSubmitting || hasValidationErrors}
               aria-busy={isSubmitting}
               aria-label={isSubmitting ? "Publishing confession..." : "Publish confession"}
-              className="min-h-[48px] min-w-[160px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]"
+              className="min-h-[48px] w-full sm:w-auto min-w-[160px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]"
             >
               {isSubmitting ? (
                 <>

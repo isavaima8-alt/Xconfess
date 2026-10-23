@@ -2,12 +2,15 @@ function SkeletonPill({ className }: { className: string }) {
   return <div className={`animate-pulse rounded-full bg-[var(--skeleton)] ${className}`} />;
 }
 
-export const SkeletonCard = () => (
-  <div className="luxury-panel animate-pulse rounded-[30px] p-6 border border-[var(--border)] bg-[var(--surface)]">
-    <div className="mb-4 flex items-center justify-between border-b border-[var(--border)] pb-4">
-      <div className="flex items-center gap-3">
-        <div className="h-10 w-10 rounded-full bg-[var(--skeleton)]" />
-        <div className="space-y-2">
+export const SkeletonCard = ({ hasMedia = false }: { hasMedia?: boolean }) => (
+  <div
+    className="luxury-panel animate-pulse rounded-2xl p-4 sm:p-6 border border-[var(--border)] bg-[var(--surface)] min-h-[200px]"
+    data-testid="feed-skeleton-card"
+  >
+    <div className="mb-3 flex items-center justify-between gap-3 border-b border-[var(--border)] pb-3 sm:mb-4">
+      <div className="flex min-w-0 items-center gap-3">
+        <div className="h-11 w-11 min-h-[44px] min-w-[44px] shrink-0 rounded-xl bg-[var(--skeleton)] aspect-square" />
+        <div className="space-y-1.5">
           <div className="h-4 w-28 rounded bg-[var(--skeleton)]" />
           <div className="h-3 w-20 rounded bg-[var(--accent-soft)]" />
         </div>
@@ -15,15 +18,18 @@ export const SkeletonCard = () => (
       <div className="h-3 w-16 rounded bg-[var(--skeleton)]" />
     </div>
 
-    <div className="mb-6 space-y-3">
-      <div className="h-4 w-24 rounded-full bg-[var(--accent-soft)]" />
-      <div className="h-7 w-full rounded bg-[var(--skeleton)]" />
-      <div className="h-7 w-full rounded bg-[var(--skeleton)]" />
-      <div className="h-7 w-3/4 rounded bg-[var(--skeleton)]" />
+    <div className="space-y-3 py-1">
+      <div className="h-5 w-full rounded bg-[var(--skeleton)]" />
+      <div className="h-5 w-5/6 rounded bg-[var(--skeleton)]" />
+      <div className="h-5 w-3/4 rounded bg-[var(--skeleton)]" />
     </div>
 
-    <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
-      <div className="flex items-center gap-3">
+    {hasMedia && (
+      <div className="my-3 w-full rounded-xl bg-[var(--skeleton)] aspect-[16/9]" />
+    )}
+
+    <div className="mt-3 flex flex-col justify-between gap-3 border-t border-[var(--border)] pt-3 sm:mt-4 sm:flex-row sm:items-center">
+      <div className="flex items-center gap-2">
         <SkeletonPill className="h-10 w-16" />
         <SkeletonPill className="h-10 w-16" />
       </div>

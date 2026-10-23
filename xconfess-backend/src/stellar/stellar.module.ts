@@ -14,6 +14,7 @@ import { StellarReconciliationWorker } from './stellar-reconciliation.worker';
 import { ReputationReconciliationWorker } from './reputation-reconciliation.worker';
 import { StellarAnchor } from './entities/stellar-anchor.entity';
 import { SorobanEventCheckpoint } from './entities/soroban-event-checkpoint.entity';
+import { ReputationReconciliationCheckpoint } from './entities/reputation-reconciliation-checkpoint.entity';
 import { AnonymousConfession } from '../confession/entities/confession.entity';
 import { Tip } from '../tipping/entities/tip.entity';
 import { SorobanEventCheckpointService } from './soroban-event-checkpoint.service';
@@ -29,6 +30,7 @@ import { AccountSequenceCoordinatorService } from './account-sequence-coordinato
     TypeOrmModule.forFeature([
       StellarAnchor,
       SorobanEventCheckpoint,
+      ReputationReconciliationCheckpoint,
       AnonymousConfession,
       Tip,
     ]),

@@ -69,32 +69,33 @@ export class PerformanceInterceptor implements NestInterceptor {
       return next.handle();
     }
 
-    const { method, url } = req as { method: string; url: string };
+    const { method } = req as { method: string };
+    const route = this.resolveRoute(req);
     const start = Date.now();
 
     return (next.handle() as any).pipe(
       tap(() => {
         const durationMs = Date.now() - start;
-        const budget = findBudget(method, url);
+        const budget = findBudget(method, route);
         const level = classifyLatency(durationMs, budget);
 
-        this.recordSample(method, url, durationMs);
+        this.recordSample(method, route, durationMs);
 
         if (level === 'critical') {
           this.logger.error(
-            `LATENCY_CRITICAL: ${method} ${url} ${durationMs}ms` +
+            `LATENCY_CRITICAL: ${method} ${route} ${durationMs}ms` +
               ` (p99 budget=${budget.p99Ms}ms, layer=${budget.primarySlowLayer})`,
           );
         } else if (level === 'warn') {
           this.logger.warn(
-            `LATENCY_WARN: ${method} ${url} ${durationMs}ms` +
+            `LATENCY_WARN: ${method} ${route} ${durationMs}ms` +
               ` (p95 budget=${budget.p95Ms}ms, layer=${budget.primarySlowLayer})`,
           );
         }
 
         // Legacy slow-request log kept for backward compatibility.
         if (durationMs > 200) {
-          this.logger.warn(`SLOW: ${method} ${url} took ${durationMs}ms`);
+          this.logger.warn(`SLOW: ${method} ${route} took ${durationMs}ms`);
         }
       }),
     );
@@ -155,8 +156,23 @@ export class PerformanceInterceptor implements NestInterceptor {
 
   // ── Private helpers ────────────────────────────────────────────────────────
 
-  private recordSample(method: string, url: string, durationMs: number): void {
-    const key = `${method} ${url}`;
+  private resolveRoute(req: {
+    baseUrl?: string;
+    route?: { path?: string | string[] };
+    url?: string;
+  }): string {
+    const routePath = Array.isArray(req.route?.path)
+      ? req.route.path[0]
+      : req.route?.path;
+    if (typeof routePath === 'string') {
+      return `${req.baseUrl ?? ''}${routePath}`.split('?')[0] || '/';
+    }
+
+    return '/:unmatched';
+  }
+
+  private recordSample(method: string, route: string, durationMs: number): void {
+    const key = `${method} ${route}`;
     let arr = this.samples.get(key);
 
     if (!arr) {

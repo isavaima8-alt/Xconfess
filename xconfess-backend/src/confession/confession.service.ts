@@ -2,6 +2,7 @@ import {
   Injectable,
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   NotFoundException,
   InternalServerErrorException,
   Optional,
@@ -37,6 +38,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { AnonymousUserService } from '../user/anonymous-user.service';
 import { EntityManager, Repository } from 'typeorm';
 import { AnonymousUser } from '../user/entities/anonymous-user.entity';
+import { User } from '../user/entities/user.entity';
 import { AnonymousConfession } from './entities/confession.entity';
 import { AppLogger } from '../logger/logger.service';
 import { maskUserId } from '../utils/mask-user-id';
@@ -54,6 +56,12 @@ import { mapToSlimConfession } from './utils/confession-mapper';
 import { AnomalyDetectionService } from '../anomaly/anomaly-detection.service';
 import { ConfessionIdempotencyService } from './confession-idempotency.service';
 import { AnalyticsEventService } from '../analytics/analytics-event.service';
+
+export interface ArchiveActor {
+  id?: string | number | null;
+  role?: string | null;
+  type?: string | null;
+}
 
 @Injectable()
 export class ConfessionService {
@@ -79,6 +87,37 @@ export class ConfessionService {
 
   private get aesKey(): string {
     return this.configService.get<string>('app.confessionAesKey', '');
+  }
+
+  private assertArchivedRecordAccess(actor?: ArchiveActor): void {
+    if (!actor) {
+      throw new ForbiddenException(
+        'Archived record access requires an explicit actor context',
+      );
+    }
+
+    const role = String(actor.role ?? actor.type ?? '').toLowerCase();
+    if (role !== 'admin' && role !== 'system') {
+      throw new ForbiddenException(
+        'Only administrators may access or restore archived records',
+      );
+    }
+  }
+
+  private redactArchivedRecord<T extends Record<string, any>>(record: T): T {
+    const redacted = { ...record };
+
+    if (typeof redacted.message === 'string') {
+      redacted.message = '[REDACTED: Archived record]';
+    }
+    if (typeof redacted.content === 'string') {
+      redacted.content = '[REDACTED: Archived record]';
+    }
+    if (typeof redacted.replyContent === 'string') {
+      redacted.replyContent = '[REDACTED: Archived record]';
+    }
+
+    return redacted;
   }
 
   private sanitizeMessage(message: string): string {
@@ -358,7 +397,7 @@ export class ConfessionService {
     }
   }
 
-  async getConfessions(dto: GetConfessionsDto) {
+  async getConfessions(dto: GetConfessionsDto, requestingUserId?: number) {
     const limit = dto.limit ?? 10;
     const sort = dto.sort || SortOrder.NEWEST;
 
@@ -367,6 +406,24 @@ export class ConfessionService {
       dto.cursor,
     );
 
+    let blockedUserIds: number[] = [];
+    let mutedUserIds: number[] = [];
+    if (requestingUserId) {
+      try {
+        const requestingUser = await this.confessionRepo.manager
+          .getRepository(User)
+          .findOne({ where: { id: requestingUserId } });
+        if (requestingUser) {
+          blockedUserIds = requestingUser.getBlockedUserIds();
+          mutedUserIds = requestingUser.getMutedUserIds();
+        }
+      } catch (e) {
+        // Fallback gracefully
+      }
+    }
+
+    const excludedUserIds = Array.from(new Set([...blockedUserIds, ...mutedUserIds]));
+
     const cacheKey = this.cacheService.buildKey(
       'confessions',
       dto.cursor || 'no-cursor',
@@ -374,6 +431,7 @@ export class ConfessionService {
       limit,
       dto.gender || 'all',
       dto.sort || 'recent',
+      requestingUserId ? `user:${requestingUserId}` : 'anon',
     );
 
     const cached = await this.cacheService.get<any>(cacheKey);
@@ -413,8 +471,19 @@ export class ConfessionService {
               "linked_user.privacy_settings->>'isDiscoverable' IS DISTINCT FROM 'false'",
             );
         }),
-      )
-      .leftJoinAndSelect('confession.reactions', 'reactions')
+      );
+
+    if (excludedUserIds.length > 0) {
+      qb.andWhere(
+        new Brackets((sub) => {
+          sub
+            .where('userLinks.id IS NULL')
+            .orWhere('linked_user.id NOT IN (:...excludedUserIds)', { excludedUserIds });
+        }),
+      );
+    }
+
+    qb.leftJoinAndSelect('confession.reactions', 'reactions')
       .select([
         'confession.id',
         'confession.message',
@@ -568,7 +637,9 @@ export class ConfessionService {
   /**
    * Restore a soft-deleted confession (admin only).
    */
-  async restore(id: string) {
+  async restore(id: string, actor?: ArchiveActor) {
+    this.assertArchivedRecordAccess(actor);
+
     const existing = await this.confessionRepo.findOne({
       where: { id, isDeleted: true },
     });
@@ -585,7 +656,9 @@ export class ConfessionService {
   /**
    * List soft-deleted confessions for admin review.
    */
-  async getDeletedConfessions(page = 1, limit = 50) {
+  async getDeletedConfessions(page = 1, limit = 50, actor?: ArchiveActor) {
+    this.assertArchivedRecordAccess(actor);
+
     const skip = (page - 1) * limit;
     const [data, total] = await this.confessionRepo.findAndCount({
       where: { isDeleted: true },
@@ -595,7 +668,7 @@ export class ConfessionService {
     });
 
     return {
-      data: data.map((c) => ({
+      data: data.map((c) => this.redactArchivedRecord({
         ...c,
         message: decryptConfession(c.message, this.aesKey),
       })),

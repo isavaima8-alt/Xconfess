@@ -6,6 +6,10 @@ import { ArrowUp } from "lucide-react";
 import { ConfessionCard } from "./ConfessionCard";
 import { ConfessionFeedSkeleton } from "./LoadingSkeleton";
 import { useInfiniteConfessions } from "../../lib/hooks/useConfessionsQuery";
+import {
+  useScrollRestoration,
+  usePaginationScrollAnchor,
+} from "../../lib/hooks/useScrollRestoration";
 import ErrorState from "../common/ErrorState";
 
 const ESTIMATED_CARD_HEIGHT = 300;
@@ -37,6 +41,13 @@ export const ConfessionFeed = () => {
 
   const allConfessions = data?.pages.flatMap((page) => page.confessions) ?? [];
   const isEmpty = !isLoading && !error && allConfessions.length === 0;
+
+  useScrollRestoration("feed", {
+    isReady: !isLoading && allConfessions.length > 0,
+    enableKeyboardAnchor: true,
+  });
+
+  usePaginationScrollAnchor(isFetchingNextPage, allConfessions.length);
 
   const virtualizer = useWindowVirtualizer({
     count: allConfessions.length,
@@ -180,6 +191,7 @@ export const ConfessionFeed = () => {
           opacity: isFetching && !isFetchingNextPage ? 0.7 : 1,
         }}
         role="feed"
+        data-testid="feed-container"
         aria-label="Confessions feed"
       >
         {virtualItems.map((virtualItem) => {
@@ -205,7 +217,11 @@ export const ConfessionFeed = () => {
         })}
       </div>
 
-      <div ref={loadMoreRef} className="flex justify-center py-6">
+      <div
+        ref={loadMoreRef}
+        data-testid="load-more-container"
+        className="flex min-h-[56px] items-center justify-center py-6"
+      >
         {isFetchingNextPage && (
           <div className="flex items-center gap-2 text-sm text-[var(--secondary)]">
             <svg

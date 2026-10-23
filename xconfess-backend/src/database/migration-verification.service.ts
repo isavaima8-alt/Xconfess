@@ -22,6 +22,14 @@ export interface SchemaReadinessResult {
   queryError?: string;
 }
 
+export interface MigrationDriftResult {
+  ok: boolean;
+  pendingMigrations: string[];
+  unknownAppliedMigrations: string[];
+  schemaChanges: string[];
+  queryError?: string;
+}
+
 function getMigrationHint(column: string): string {
   switch (column) {
     case 'search_vector':
@@ -49,6 +57,69 @@ export class MigrationVerificationService implements OnModuleInit {
   private readonly logger = new Logger(MigrationVerificationService.name);
 
   constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
+
+  /** Compare applied TypeORM migrations and live schema with committed metadata. */
+  async checkMigrationDrift(): Promise<MigrationDriftResult> {
+    const queryRunner = this.dataSource.createQueryRunner('master');
+    try {
+      await queryRunner.connect();
+      await queryRunner.startTransaction();
+      await queryRunner.query('SET TRANSACTION READ ONLY');
+
+      const tableName = this.dataSource.options.migrationsTableName || 'migrations';
+      const hasMigrationsTable = await queryRunner.hasTable(tableName);
+      const appliedRows = hasMigrationsTable
+        ? await queryRunner.query(
+            `SELECT name FROM "${tableName.replace(/"/g, '""')}"`,
+          )
+        : [];
+      const applied = new Set(
+        appliedRows.map((row: { name: string }) => row.name),
+      );
+      const registered = new Set(
+        this.dataSource.migrations.map((migration) => migration.name),
+      );
+      const pendingMigrations = [...registered]
+        .filter((name) => !applied.has(name))
+        .sort();
+      const unknownAppliedMigrations = [...applied]
+        .filter((name) => !registered.has(name))
+        .sort();
+
+      // TypeORM computes the SQL diff from metadata but does not execute it.
+      const schemaLog = await this.dataSource.driver
+        .createSchemaBuilder()
+        .log();
+      const schemaChanges = schemaLog.upQueries.map((query) =>
+        query.query.replace(/'[^']*'/g, "'[redacted]'").trim(),
+      );
+
+      await queryRunner.commitTransaction();
+      return {
+        ok:
+          pendingMigrations.length === 0 &&
+          unknownAppliedMigrations.length === 0 &&
+          schemaChanges.length === 0,
+        pendingMigrations,
+        unknownAppliedMigrations,
+        schemaChanges,
+      };
+    } catch {
+      if (queryRunner.isTransactionActive) {
+        await queryRunner.rollbackTransaction().catch(() => undefined);
+      }
+      return {
+        ok: false,
+        pendingMigrations: [],
+        unknownAppliedMigrations: [],
+        schemaChanges: [],
+        queryError:
+          'Database drift check failed. Verify read-only database access and connectivity; detailed errors are suppressed.',
+      };
+    } finally {
+      await queryRunner.release().catch(() => undefined);
+    }
+  }
 
   async onModuleInit(): Promise<void> {
     if (process.env.NODE_ENV === 'test') {

@@ -83,14 +83,38 @@ Resolve multiple reports at once.
 ### Confessions
 
 #### DELETE /api/admin/confessions/:id
-Delete a confession (soft delete).
+Deprecated direct deletion endpoint. It returns `409
+ADMIN_ACTION_APPROVAL_REQUIRED` and never deletes the confession. Confession
+deletion is currently the only eligible high-impact admin action and requires
+approval by a different admin.
 
-**Body:**
+#### GET /api/admin/action-approvals
+List up to 100 pending high-impact action requests in request order.
+
+#### POST /api/admin/action-approvals
+Request a high-impact admin action. Admin authentication is required; this
+endpoint does not execute the action.
+
 ```json
 {
-  "reason": "Optional reason for deletion"
+  "action": "confession.delete",
+  "targetId": "confession-uuid",
+  "reason": "Policy and evidence supporting deletion"
 }
 ```
+
+Requests expire after `ADMIN_ACTION_APPROVAL_TTL_MINUTES` (default `30`,
+allowed range `5` to `1440`). The requestor cannot approve their own request.
+
+#### POST /api/admin/action-approvals/:id/approve
+Approve and execute a pending request. The approving admin must be different
+from the requester and provide recent step-up proof. Approval, soft deletion,
+and their audit records commit atomically.
+
+#### POST /api/admin/action-approvals/:id/cancel
+Cancel a pending request created by the calling admin. Recent step-up proof is
+required. An expired request returns `410 Gone`; terminal requests return
+`409 Conflict`.
 
 #### PATCH /api/admin/confessions/:id/hide
 Hide a confession from public view.
@@ -174,6 +198,59 @@ Get audit logs of all moderation actions.
 - `entityId` (optional): Filter by specific entity ID
 - `limit` (optional, default: 100): Number of results
 - `offset` (optional, default: 0): Pagination offset
+
+### Cross-Domain Data Integrity
+
+#### GET /api/admin/integrity/report
+Generate a read-only cross-domain integrity verification report across identity, content, export, and moderation domains.
+
+**Query Parameters:**
+- `domains` (optional): Comma-separated list of domains to verify (`identity`, `content`, `export`, `moderation`). Defaults to all.
+- `limit` (optional, default: 50, max: 200): Maximum violation samples per check.
+- `timeoutMs` (optional, default: 5000, max: 30000): Bounded execution time budget in milliseconds.
+
+**Response (200 OK):**
+```json
+{
+  "reportId": "rep-integrity-1718000000000-abc123",
+  "generatedAt": "2026-10-18T12:00:00.000Z",
+  "executionDurationMs": 42,
+  "bounded": {
+    "limitPerCheck": 50,
+    "timeoutMs": 5000,
+    "truncated": false
+  },
+  "summary": {
+    "totalChecks": 11,
+    "passedChecks": 11,
+    "failedChecks": 0,
+    "totalViolations": 0
+  },
+  "checks": [
+    {
+      "name": "identity_orphan_user_link",
+      "domain": "identity",
+      "status": "PASSED",
+      "violationsCount": 0,
+      "violations": [],
+      "durationMs": 4
+    }
+  ]
+}
+```
+
+**Stable Error Codes:**
+- `ERR_INTEGRITY_IDENTITY_ORPHAN_USER_LINK`: Orphan link to non-existent user.
+- `ERR_INTEGRITY_IDENTITY_ORPHAN_ANONYMOUS_LINK`: Orphan link to non-existent anonymous identity.
+- `ERR_INTEGRITY_CONTENT_ORPHAN_ANONYMOUS_AUTHOR`: Confession author missing in anonymous user table.
+- `ERR_INTEGRITY_CONTENT_ORPHAN_COMMENT_CONFESSION`: Comment referencing non-existent confession.
+- `ERR_INTEGRITY_EXPORT_ORPHAN_USER`: Data export request referencing missing user.
+- `ERR_INTEGRITY_EXPORT_CHUNK_COUNT_MISMATCH`: Export chunk count mismatch vs stored record.
+- `ERR_INTEGRITY_EXPORT_ORPHAN_CHUNK`: Export chunk without valid parent export request.
+- `ERR_INTEGRITY_MODERATION_ORPHAN_REPORT_CONFESSION`: Report targeting deleted/missing confession.
+- `ERR_INTEGRITY_MODERATION_ORPHAN_REPORTER_USER`: Report with non-existent user reporter ID.
+- `ERR_INTEGRITY_MODERATION_ORPHAN_REPORTER_ANONYMOUS`: Report with non-existent anonymous reporter.
+- `ERR_INTEGRITY_MODERATION_ORPHAN_EVIDENCE_TARGET`: Moderation evidence without legal hold targeting missing confession.
 
 ## Error Responses
 

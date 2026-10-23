@@ -16,7 +16,11 @@ export function useStepUp() {
   }, []);
 
   const verify = useCallback(
-    async (credentials: { password?: string; totpToken?: string }) => {
+    async (credentials: {
+      password?: string;
+      totpToken?: string;
+      recoveryCode?: string;
+    }) => {
       setIsVerifying(true);
       setError(null);
       try {

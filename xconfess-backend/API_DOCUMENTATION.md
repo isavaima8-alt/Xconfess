@@ -221,8 +221,12 @@ transaction and are atomic:
 - Admin report resolution and dismissal (`/api/admin/reports/:id/resolve`,
   `/api/admin/reports/:id/dismiss`)
 - Admin bulk report resolution (`/api/admin/reports/bulk-resolve`)
-- Admin confession actions (`DELETE /api/admin/confessions/:id`,
-  `/api/admin/confessions/:id/hide`, `/api/admin/confessions/:id/unhide`)
+- Admin confession deletion approval (request, second-admin approval, soft
+  deletion, and audit records) is atomic. The legacy
+  `DELETE /api/admin/confessions/:id` route is disabled and returns
+  `409 ADMIN_ACTION_APPROVAL_REQUIRED`.
+- Admin confession hiding and unhiding
+  (`/api/admin/confessions/:id/hide`, `/api/admin/confessions/:id/unhide`)
 - Admin user moderation actions (`/api/admin/users/:id/ban`,
   `/api/admin/users/:id/unban`)
 - Moderation webhook application (`POST /api/webhooks/moderation/results`)
@@ -334,7 +338,11 @@ The following list matches active `@Controller(...)` + method decorators.
 | PATCH | `/api/admin/reports/:id/resolve` |
 | PATCH | `/api/admin/reports/:id/dismiss` |
 | PATCH | `/api/admin/reports/bulk-resolve` |
-| DELETE | `/api/admin/confessions/:id` |
+| GET | `/api/admin/action-approvals` |
+| POST | `/api/admin/action-approvals` |
+| POST | `/api/admin/action-approvals/:id/approve` |
+| POST | `/api/admin/action-approvals/:id/cancel` |
+| DELETE | `/api/admin/confessions/:id` (deprecated; returns 409) |
 | PATCH | `/api/admin/confessions/:id/hide` |
 | PATCH | `/api/admin/confessions/:id/unhide` |
 | GET | `/api/admin/users/search` |
@@ -348,6 +356,7 @@ The following list matches active `@Controller(...)` + method decorators.
 | GET | `/api/admin/moderation/stats` |
 | GET | `/api/admin/moderation/accuracy` |
 | GET | `/api/admin/moderation/config` |
+| POST | `/api/admin/moderation/policy-impact-preview` |
 | POST | `/api/admin/moderation/config/thresholds` |
 | POST | `/api/admin/moderation/test` |
 | GET | `/api/admin/moderation/confession/:confessionId` |
@@ -382,6 +391,10 @@ The following list matches active `@Controller(...)` + method decorators.
 | GET | `/api/confessions/:id/tips/stats` |
 | POST | `/api/confessions/:id/tips/verify` |
 | GET | `/api/data-export/download/:id` |
+
+### Moderation policy impact approval
+
+`POST /api/admin/moderation/policy-impact-preview` accepts `highThreshold` and `mediumThreshold` and returns an aggregate-only preview with a one-time `previewId`. The preview uses the local scorer and synthetic fixture corpus. To apply it, `POST /api/admin/moderation/config/thresholds` must include the same thresholds, that `previewId`, and `"approved": true`. The approval is valid for 10 minutes and fails if the active thresholds changed or another preview replaced it. Both routes require an admin JWT.
 
 ## Removed legacy assumptions from older docs
 

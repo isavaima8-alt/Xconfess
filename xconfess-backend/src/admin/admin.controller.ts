@@ -11,6 +11,7 @@ import {
   Req,
   HttpCode,
   HttpStatus,
+  ConflictException,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -43,6 +44,10 @@ import { StellarDiagnosticsService } from './services/stellar-diagnostics.servic
 import { DiagnosticsBundleService } from './services/diagnostics-bundle.service';
 import { RankingDriftService } from '../ranking/ranking-drift.service';
 import {
+  CrossDomainIntegrityService,
+  IntegrityDomain,
+} from './services/cross-domain-integrity.service';
+import {
   IsString,
   IsEnum,
   IsOptional,
@@ -50,6 +55,10 @@ import {
   MaxLength,
   MinLength,
 } from 'class-validator';
+import {
+  CancelActionApprovalDto,
+  RequestActionApprovalDto,
+} from './dto/request-action-approval.dto';
 
 export class CreateTemplateDto {
   @IsNotEmpty({ message: 'Name is required' })
@@ -137,6 +146,7 @@ export class AdminController {
     private readonly stellarDiagnosticsService: StellarDiagnosticsService,
     private readonly diagnosticsBundleService: DiagnosticsBundleService,
     private readonly rankingDriftService: RankingDriftService,
+    private readonly crossDomainIntegrityService: CrossDomainIntegrityService,
   ) {}
 
   // Reports
@@ -309,35 +319,81 @@ export class AdminController {
     );
   }
   // Confessions
-  @Delete('confessions/:id')
-  @UseGuards(StepUpGuard)
-  @HttpCode(HttpStatus.OK)
-  @UseGuards(StepUpGuard)
-  @ApiOperation({ summary: 'Admin-delete a confession' })
-  @ApiParam({ name: 'id', description: 'Confession UUID' })
-  @ApiBody({ schema: { example: { reason: 'Violates community standards.' } } })
-  @ApiResponse({
-    status: 200,
-    description: 'Confession deleted.',
-    schema: { example: { message: 'Confession deleted successfully' } },
+  @Get('action-approvals')
+  @ApiOperation({
+    summary: 'List pending high-impact admin action approvals',
   })
-  @ApiResponse({
-    status: 403,
-    description: 'Missing or expired step-up proof.',
-  })
-  async deleteConfession(
-    @Param('id') id: string,
-    @Body() body: { reason?: string },
+  async getPendingActionApprovals() {
+    return this.adminService.findPendingAdminActionApprovals();
+  }
+
+  @Post('action-approvals')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Request approval for a high-impact admin action' })
+  @ApiResponse({ status: 201, description: 'Approval request created.' })
+  async requestActionApproval(
+    @Body() dto: RequestActionApprovalDto,
     @GetUser('id') adminId: number,
     @Req() req: AuthedRequest,
   ) {
-    await this.adminService.deleteConfession(
-      id,
+    return this.adminService.requestAdminActionApproval(
+      dto.action,
+      dto.targetId,
+      dto.reason,
       adminId,
-      body.reason || null,
       req,
     );
-    return { message: 'Confession deleted successfully' };
+  }
+
+  @Post('action-approvals/:id/approve')
+  @UseGuards(StepUpGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Approve and execute a pending action as a second administrator',
+  })
+  @ApiResponse({ status: 410, description: 'Approval request has expired.' })
+  async approveActionApproval(
+    @Param('id') id: string,
+    @GetUser('id') adminId: number,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.adminService.approveAdminAction(id, adminId, req);
+  }
+
+  @Post('action-approvals/:id/cancel')
+  @UseGuards(StepUpGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Cancel an action approval request you created' })
+  async cancelActionApproval(
+    @Param('id') id: string,
+    @Body() dto: CancelActionApprovalDto,
+    @GetUser('id') adminId: number,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.adminService.cancelAdminActionApproval(
+      id,
+      adminId,
+      dto.reason,
+      req,
+    );
+  }
+
+  @Delete('confessions/:id')
+  @UseGuards(StepUpGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Deprecated direct confession deletion endpoint' })
+  @ApiParam({ name: 'id', description: 'Confession UUID' })
+  @ApiResponse({
+    status: 409,
+    description:
+      'Direct deletion is disabled; submit and receive a second-admin approval.',
+  })
+  async deleteConfession(): Promise<never> {
+    throw new ConflictException({
+      code: 'ADMIN_ACTION_APPROVAL_REQUIRED',
+      message:
+        'Confession deletion requires a second administrator. Submit POST /api/admin/action-approvals.',
+    });
   }
 
   @Patch('confessions/:id/hide')
@@ -851,6 +907,55 @@ export class AdminController {
       adminId,
       reason: body?.reason || null,
       req,
+    });
+  }
+
+  @Get('integrity/report')
+  @ApiOperation({
+    summary: 'Generate cross-domain data integrity report',
+    description:
+      'Performs read-only bounded checks across identity, content, export, and moderation ' +
+      'domains to detect invariant violations, orphan references, and data corruption.',
+  })
+  @ApiQuery({
+    name: 'domains',
+    required: false,
+    description: 'Comma-separated domains to check: identity,content,export,moderation',
+  })
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    description: 'Max sample violations per check (1-200, default 50)',
+  })
+  @ApiQuery({
+    name: 'timeoutMs',
+    required: false,
+    description: 'Bounded execution time budget in ms (100-30000, default 5000)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Integrity report containing stable error codes and repair guidance.',
+  })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Forbidden — admin role required' })
+  async getIntegrityReport(
+    @Query('domains') domains?: string,
+    @Query('limit') limit?: string,
+    @Query('timeoutMs') timeoutMs?: string,
+  ) {
+    const parsedDomains = domains
+      ? (domains
+          .split(',')
+          .map((d) => d.trim().toLowerCase())
+          .filter((d) =>
+            ['identity', 'content', 'export', 'moderation'].includes(d),
+          ) as IntegrityDomain[])
+      : undefined;
+
+    return this.crossDomainIntegrityService.runIntegrityReport({
+      domains: parsedDomains,
+      limit: limit ? parseInt(limit, 10) : undefined,
+      timeoutMs: timeoutMs ? parseInt(timeoutMs, 10) : undefined,
     });
   }
 }

@@ -6,16 +6,18 @@ This runbook documents how the team handles user data export requests during nor
 
 ### Request Intake
 - **Rate Limiting:** Users can request exactly **one** export every 7 days.
-- **State Machine:** Requests follow a strict timeline: `PENDING` -> `PROCESSING` -> `READY` (or `FAILED`) -> `EXPIRED`.
+- **State Machine:** Requests follow `PENDING` -> `PROCESSING` -> `READY` (or `FAILED`), with `CANCELLED` used when the owner cancels or their privacy state changes. Ready artifacts later become `EXPIRED` at the retention boundary.
 - **Initial Audit Event:** Upon request creation, the `auditLogService` logs a `request_created` event binding the user ID to the request ID.
 
 ### Generation & Processing
 - The background `export-queue` (Bull) picks up the `PENDING` job, marking it `PROCESSING`.
 - Service compiles the user's confessions, messages, reactions, etc., and generates CSVs or zipped chunks.
 - Upon completion, the status changes to `READY`, and a `generation_completed` audit event is logged by the system.
+- **Snapshot consistency:** The snapshot is bound to a SHA-256 fingerprint of the user's privacy-relevant state at worker pickup. The worker compares it after compilation and chunk writes and only publishes while the request remains `PROCESSING` with that same fingerprint. Any account deletion, deactivation, reactivation, or privacy-settings update cancels the user's pending/processing/ready exports and removes stored files/chunks.
 
 ### Delivery & Expiry
 - **Secure Download Links:** The system generates signed, expiring URLs (`generateSignedDownloadUrl`) using HMAC SHA-256 for the delivery of the export payload.
+- **Delivery authorization:** Every link issuance and download re-checks request ownership, current user existence, processing consent, and snapshot fingerprint. Missing accounts return not found; withdrawn consent returns forbidden; stale snapshots return gone and their artifacts are purged. Download authorization runs before consuming the one-time token.
 - **Link Expiration:** Download links are strictly valid for **24 hours** from generation. 
 - **Time Window Expiration:** Once the 24-hour window passes, the link expires and the request state is treated as `EXPIRED`. Users must wait until the original 7-day rate limit ends to request a new export link, to mitigate ongoing exposure risks.
 - **Download Audit:** Every time the payload is fetched, a `downloaded` event is generated for tracking access.
@@ -23,6 +25,9 @@ This runbook documents how the team handles user data export requests during nor
 ---
 
 ## 2. Incident Response
+
+### Rollout
+Apply migration `AddExportPrivacySnapshotVersion20261021000001` before deploying the worker/API code. Existing exports have no fingerprint and are intentionally rejected and purged on the next link or download attempt; users can request a fresh export subject to the existing seven-day rate limit.
 
 If an operational anomaly or security violation occurs regarding an export, follow the steps below.
 

@@ -39,6 +39,8 @@ import { GetConfessionsDto } from './dto/get-confessions.dto';
 import { SearchConfessionDto } from './dto/search-confession.dto';
 import { UpdateConfessionDto } from './dto/update-confession.dto';
 import { OptionalJwtAuthGuard } from '../auth/optional-jwt-auth.guard';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { AdminGuard } from '../auth/admin.guard';
 import { SearchDiscoveryService } from '../search-discovery/search-discovery.service';
 import { SparseFieldsetsInterceptor } from '../common/interceptors/sparse-fieldsets.interceptor';
 import { ConfessionSchedulerService } from './confession-scheduler.service';
@@ -165,6 +167,7 @@ export class ConfessionController {
   }
 
   @Get()
+  @UseGuards(OptionalJwtAuthGuard)
   @ApiOperation({ summary: 'Get paginated confessions list' })
   @ApiResponse({
     status: 200,
@@ -187,7 +190,11 @@ export class ConfessionController {
     },
   })
   @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
-  findAll(@Query() dto: GetConfessionsDto) {
+  findAll(@Query() dto: GetConfessionsDto, @Req() req?: any) {
+    const requestingUserId = req?.user?.id ?? req?.user?.sub;
+    if (requestingUserId !== undefined && requestingUserId !== null) {
+      return this.service.getConfessions(dto, Number(requestingUserId));
+    }
     return this.service.getConfessions(dto);
   }
 
@@ -237,11 +244,16 @@ export class ConfessionController {
   }
 
   @Get('deleted')
+  @UseGuards(JwtAuthGuard, AdminGuard)
   @ApiOperation({ summary: 'List soft-deleted confessions (admin)' })
   @ApiQuery({ name: 'page', required: false, type: Number })
   @ApiQuery({ name: 'limit', required: false, type: Number })
-  getDeleted(@Query('page') page?: number, @Query('limit') limit?: number) {
-    return this.service.getDeletedConfessions(page, limit);
+  getDeleted(
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+    @Req() req?: Request,
+  ) {
+    return this.service.getDeletedConfessions(page, limit, req?.user as any);
   }
 
   /**
@@ -279,10 +291,11 @@ export class ConfessionController {
   }
 
   @Patch(':id/restore')
+  @UseGuards(JwtAuthGuard, AdminGuard)
   @ApiOperation({ summary: 'Restore a soft-deleted confession (admin)' })
   @ApiParam({ name: 'id', description: 'Confession UUID' })
-  restore(@Param('id') id: string) {
-    return this.service.restore(id);
+  restore(@Param('id') id: string, @Req() req: Request) {
+    return this.service.restore(id, req.user as any);
   }
 
   @Post(':id/schedule')

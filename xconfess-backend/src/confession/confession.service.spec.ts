@@ -2,7 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { AnonymousConfession } from './entities/confession.entity';
 import { ConfessionService } from './confession.service';
 import { SelectQueryBuilder, Repository } from 'typeorm';
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { AnonymousConfessionRepository } from './repository/confession.repository';
 import { ConfessionViewCacheService } from './confession-view-cache.service';
 import { SortOrder } from './dto/get-confessions.dto';
@@ -218,6 +218,36 @@ describe('ConfessionService', () => {
           ],
         }),
       );
+    });
+
+    it('restore() rejects non-admin actors for deleted confessions', async () => {
+      repo.findOne.mockResolvedValue({
+        id: 'deleted-id',
+        isDeleted: true,
+        anonymousUser: { userLinks: [{ userId: 42 }] },
+      } as any);
+
+      await expect(
+        service.restore('deleted-id', { id: 99, role: 'USER' }),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('getDeletedConfessions() rejects non-admin actors and redacts payloads', async () => {
+      repo.findAndCount = jest.fn().mockResolvedValue([
+        [
+          {
+            id: 'deleted-id',
+            isDeleted: true,
+            message: 'secret payload',
+            created_at: new Date(),
+          },
+        ],
+        1,
+      ]);
+
+      await expect(
+        service.getDeletedConfessions(1, 20, { id: 99, role: 'USER' }),
+      ).rejects.toThrow(ForbiddenException);
     });
   });
 

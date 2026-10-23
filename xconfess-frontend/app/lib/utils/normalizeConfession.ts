@@ -14,6 +14,8 @@ export interface NormalizedConfession {
   tipStats?: TipStats | null;
   /** Safe public signal; moderation scores and category details stay private. */
   contentWarning?: boolean;
+  mediaUrl?: string | null;
+  mediaAspectRatio?: number | null;
   author?: {
     id: string;
     username?: string;
@@ -36,6 +38,13 @@ export interface RawConfession {
 
   view_count?: number;
   viewCount?: number;
+
+  media_url?: string | null;
+  mediaUrl?: string | null;
+  image_url?: string | null;
+  imageUrl?: string | null;
+  media_aspect_ratio?: number | null;
+  mediaAspectRatio?: number | null;
 
   comments?: unknown[];
   commentCount?: number;
@@ -95,6 +104,11 @@ export function normalizeConfession(raw: RawConfession): NormalizedConfession {
     tipStats: raw.tipStats ?? null,
     contentWarning:
       raw.requiresReview === true || raw.moderationStatus === "flagged",
+    mediaUrl: raw.mediaUrl ?? raw.imageUrl ?? raw.media_url ?? raw.image_url ?? null,
+    mediaAspectRatio:
+      raw.mediaAspectRatio ??
+      raw.media_aspect_ratio ??
+      (raw.mediaUrl || raw.imageUrl || raw.media_url || raw.image_url ? 16 / 9 : null),
 
     author: raw.author
       ? {

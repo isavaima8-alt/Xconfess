@@ -3,6 +3,7 @@ import {
   Injectable,
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   NotFoundException,
   Optional,
   ServiceUnavailableException,
@@ -11,20 +12,28 @@ import { ConfigService } from '@nestjs/config';
 import * as crypto from 'crypto';
 
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, MoreThan, IsNull } from 'typeorm';
+import {
+  Repository,
+  MoreThan,
+  IsNull,
+  In,
+  LessThan,
+} from 'typeorm';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { ExportRequest } from './entities/export-request.entity';
 import { ExportChunk } from './entities/export-chunk.entity';
 import { AuditLogService } from '../audit-log/audit-log.service';
 import { EXPORT_QUEUE_NAME } from './data-export.constants';
+import { CorrelationContext } from '../common/correlation/correlation.context';
 
 export type ExportHistoryStatus =
   | 'PENDING'
   | 'PROCESSING'
   | 'READY'
   | 'FAILED'
-  | 'EXPIRED';
+  | 'EXPIRED'
+  | 'CANCELLED';
 
 /** Detailed lifecycle progress returned alongside every export history item. */
 export interface ExportProgress {
@@ -64,12 +73,24 @@ export class DataExportService {
     private exportRepository: Repository<ExportRequest>,
     @InjectRepository(ExportChunk)
     private chunkRepository: Repository<ExportChunk>,
+    @InjectRepository(User)
+    private userRepository: Repository<User>,
     @InjectQueue(EXPORT_QUEUE_NAME) private exportQueue: Queue,
     private readonly configService: ConfigService,
     @Optional() private readonly auditLogService?: AuditLogService,
   ) {}
 
   async requestExport(userId: string) {
+    try {
+      await this.assertUserCanExport(userId);
+    } catch (error) {
+      await this.cancelExportForPrivacyChange(
+        requestId,
+        error instanceof NotFoundException ? 'account_deleted' : 'consent_withdrawn',
+      );
+      throw error;
+    }
+
     if (this.configService.get<string>('ENABLE_BACKGROUND_JOBS') !== 'true') {
       this.auditLogService?.logExportLifecycleEvent({
         action: 'request_created',
@@ -142,6 +163,7 @@ export class DataExportService {
     await this.exportQueue.add('process-export', {
       userId,
       requestId: request.id,
+      correlationId: CorrelationContext.getOrGenerateRequestId(),
     });
 
     return { requestId: request.id, status: 'PENDING', queuedAt: now };
@@ -151,12 +173,21 @@ export class DataExportService {
    * Called by the processor as soon as it picks up the job.
    * Transitions status to PROCESSING and stamps processingAt.
    */
-  async markExportProcessing(requestId: string): Promise<void> {
+  async markExportProcessing(requestId: string): Promise<boolean> {
     const now = new Date();
-    await this.exportRepository.update(requestId, {
-      status: 'PROCESSING',
-      processingAt: now,
-    });
+    const staleProcessingBefore = new Date(now.getTime() - 30 * 60 * 1000);
+    const result = await this.exportRepository.update(
+      [
+        { id: requestId, status: In(['PENDING', 'FAILED']) },
+        {
+          id: requestId,
+          status: 'PROCESSING',
+          processingAt: LessThan(staleProcessingBefore),
+        },
+      ],
+      { status: 'PROCESSING', processingAt: now },
+    );
+    return (result.affected ?? 0) > 0;
   }
 
   /**
@@ -173,12 +204,15 @@ export class DataExportService {
     });
     const retryCount = (current?.retryCount ?? 0) + 1;
 
-    await this.exportRepository.update(requestId, {
-      status: 'FAILED',
-      failedAt: now,
-      retryCount,
-      lastFailureReason: reason,
-    });
+    await this.exportRepository.update(
+      { id: requestId, status: 'PROCESSING' },
+      {
+        status: 'FAILED',
+        failedAt: now,
+        retryCount,
+        lastFailureReason: reason,
+      },
+    );
   }
 
   async generateSignedDownloadUrl(
@@ -186,6 +220,8 @@ export class DataExportService {
     userId: string,
     chunkIndex?: number,
   ): Promise<string> {
+    await this.assertCanDeliverExport(requestId, userId);
+
     const ttlMs = this.configService.get<number>(
       'app.exportDownloadTtlMs',
       24 * 60 * 60 * 1000,
@@ -388,6 +424,7 @@ export class DataExportService {
   }
 
   async getExportFile(requestId: string, userId: string) {
+    await this.assertCanDeliverExport(requestId, userId);
     const exportRecord = await this.exportRepository.findOne({
       where: { id: requestId, userId },
       select: [
@@ -417,12 +454,13 @@ export class DataExportService {
   }
 
   async getExportChunk(requestId: string, userId: string, chunkIndex: number) {
+    await this.assertCanDeliverExport(requestId, userId);
     // First verify ownership of the request
     const request = await this.exportRepository.findOne({
       where: { id: requestId, userId },
     });
 
-    if (!request) {
+    if (!request || request.status !== 'READY' || !request.isChunked) {
       throw new NotFoundException('Export request not found or unauthorized');
     }
 
@@ -457,17 +495,25 @@ export class DataExportService {
       );
     }
 
-    await this.exportRepository.update(requestId, {
-      status: 'CANCELLED' as any,
-      lastFailureReason: 'cancelled_by_user',
-    });
+    const cancellation = await this.exportRepository.update(
+      { id: requestId, userId, status: In(['PENDING', 'PROCESSING']) },
+      {
+        status: 'CANCELLED' as any,
+        lastFailureReason: 'cancelled_by_user',
+      },
+    );
+    if (!cancellation.affected) {
+      throw new BadRequestException(
+        'The export is no longer cancellable.',
+      );
+    }
 
     // Delete any partial chunks so partial artifacts are never accessible.
     await this.chunkRepository.delete({ exportRequestId: requestId });
 
     await this.auditLogService
       ?.logExportLifecycleEvent({
-        action: 'request_created', // reusing closest available action type
+        action: 'request_created',
         actorType: 'user',
         actorId: userId,
         requestId,
@@ -475,6 +521,147 @@ export class DataExportService {
         metadata: { action: 'cancelled', previousStatus: exportReq.status },
       })
       .catch(() => undefined);
+  }
+
+  async cancelExportForPrivacyChange(
+    requestId: string,
+    reason = 'privacy_state_changed',
+  ): Promise<void> {
+    await this.exportRepository.update(
+      { id: requestId, status: In(['PENDING', 'PROCESSING', 'FAILED', 'READY']) },
+      {
+        status: 'CANCELLED',
+        fileData: null,
+        isChunked: false,
+        chunkCount: 0,
+        totalSize: '0',
+        combinedChecksum: null,
+        downloadTokenHash: null,
+        lastFailureReason: reason,
+      },
+    );
+    await this.chunkRepository.delete({ exportRequestId: requestId });
+  }
+
+  async cancelExportsForUser(
+    userId: string,
+    reason = 'privacy_state_changed',
+  ): Promise<void> {
+    const requests = await this.findActiveExportsOnPrimary(userId);
+    if (requests.length === 0) return;
+
+    const requestIds = requests.map(({ id }) => id);
+    await this.exportRepository.update(
+      {
+        userId,
+        status: In(['PENDING', 'PROCESSING', 'FAILED', 'READY']),
+      },
+      {
+        status: 'CANCELLED',
+        fileData: null,
+        isChunked: false,
+        chunkCount: 0,
+        totalSize: '0',
+        combinedChecksum: null,
+        downloadTokenHash: null,
+        lastFailureReason: reason,
+      },
+    );
+    await this.chunkRepository.delete({ exportRequestId: In(requestIds) });
+  }
+
+  async getExportPrivacySnapshotVersion(userId: string): Promise<string | null> {
+    const user = await this.findUserOnPrimary(userId, [
+      'id',
+      'updatedAt',
+      'is_active',
+      'privacySettings',
+      'personalizationEnabled',
+    ]);
+
+    if (!user || user.privacySettings?.dataProcessingConsent === false) {
+      return null;
+    }
+
+    return crypto
+      .createHash('sha256')
+      .update(
+        JSON.stringify({
+          updatedAt: user.updatedAt?.getTime() ?? null,
+          isActive: user.is_active,
+          privacySettings: user.privacySettings ?? null,
+          personalizationEnabled: user.personalizationEnabled,
+        }),
+      )
+      .digest('hex');
+  }
+
+  async assertCanDeliverExport(requestId: string, userId: string): Promise<void> {
+    const queryRunner = this.exportRepository.manager.connection.createQueryRunner('master');
+    await queryRunner.connect();
+    let request: ExportRequest | null;
+    try {
+      request = await queryRunner.manager.getRepository(ExportRequest).findOne({
+        where: { id: requestId, userId },
+        select: ['id', 'status', 'privacySnapshotVersion'],
+      });
+    } finally {
+      await queryRunner.release();
+    }
+
+    if (!request) {
+      throw new NotFoundException('Export request not found or unauthorized');
+    }
+    if (request.status !== 'READY') {
+      throw new NotFoundException('Export file is not available');
+    }
+
+    await this.assertUserCanExport(userId);
+    const currentVersion = await this.getExportPrivacySnapshotVersion(userId);
+    if (!currentVersion || currentVersion !== request.privacySnapshotVersion) {
+      await this.cancelExportForPrivacyChange(requestId);
+      throw new GoneException('Export snapshot is no longer current.');
+    }
+  }
+
+  private async assertUserCanExport(userId: string): Promise<void> {
+    const user = await this.findUserOnPrimary(userId, ['id', 'privacySettings']);
+    if (!user) throw new NotFoundException('User not found');
+    if (user.privacySettings?.dataProcessingConsent === false) {
+      throw new ForbiddenException('Data export consent has been withdrawn.');
+    }
+  }
+
+  private async findUserOnPrimary(
+    userId: string,
+    select: (keyof User)[],
+  ): Promise<User | null> {
+    const queryRunner = this.userRepository.manager.connection.createQueryRunner('master');
+    await queryRunner.connect();
+    try {
+      return await queryRunner.manager.getRepository(User).findOne({
+        where: { id: Number(userId) },
+        select,
+      });
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
+  private async findActiveExportsOnPrimary(userId: string): Promise<Pick<ExportRequest, 'id'>[]> {
+    const queryRunner = this.exportRepository.manager.connection.createQueryRunner('master');
+    await queryRunner.connect();
+    try {
+      return await queryRunner.manager.getRepository(ExportRequest).find({
+        where: {
+          userId,
+          status: In(['PENDING', 'PROCESSING', 'FAILED', 'READY']),
+        },
+        select: ['id'],
+      });
+    } finally {
+      await queryRunner.release();
+    }
   }
 
   /**
@@ -731,14 +918,33 @@ export class DataExportService {
   }
 
   async compileUserData(userId: string): Promise<any> {
+    const queryRunner = this.exportRepository.manager.connection.createQueryRunner('master');
+    await queryRunner.connect();
+    await queryRunner.startTransaction('REPEATABLE READ');
+    try {
+      const data = await this.compileUserDataFromManager(userId, queryRunner.manager);
+      await queryRunner.commitTransaction();
+      return data;
+    } catch (error) {
+      await queryRunner.rollbackTransaction();
+      throw error;
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
+  private async compileUserDataFromManager(
+    userId: string,
+    manager: EntityManager,
+  ): Promise<any> {
     // Issue #428: Implement export redaction for deleted/deactivated users
-    const userRepo = this.exportRepository.manager.getRepository('User');
-    const confessionRepo = this.exportRepository.manager.getRepository('AnonymousConfession');
-    const commentRepo = this.exportRepository.manager.getRepository('Comment');
-    const messageRepo = this.exportRepository.manager.getRepository('Message');
+    const userRepo = manager.getRepository(User);
+    const confessionRepo = manager.getRepository('AnonymousConfession');
+    const commentRepo = manager.getRepository('Comment');
+    const messageRepo = manager.getRepository('Message');
 
     // Get user to check if active
-    const user = await userRepo.findOne({ where: { id: userId } });
+    const user = await userRepo.findOne({ where: { id: Number(userId) } });
     
     if (!user) {
       throw new NotFoundException('User not found');
@@ -768,9 +974,9 @@ export class DataExportService {
       .where('userLinks.userId = :userId', { userId })
       .getMany();
 
-    const tipRepo = this.exportRepository.manager.getRepository('Tip');
-    const reportRepo = this.exportRepository.manager.getRepository('Report');
-    const moderationLogRepo = this.exportRepository.manager.getRepository('ModerationLog');
+    const tipRepo = manager.getRepository('Tip');
+    const reportRepo = manager.getRepository('Report');
+    const moderationLogRepo = manager.getRepository('ModerationLog');
 
     const tips = await tipRepo
       .createQueryBuilder('tip')

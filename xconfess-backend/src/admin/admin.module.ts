@@ -32,6 +32,8 @@ import { TemplatesService } from './services/templates.service';
 import { StellarAnchor } from '../stellar/entities/stellar-anchor.entity';
 import { SorobanEventCheckpoint } from '../stellar/entities/soroban-event-checkpoint.entity';
 import { DiagnosticsBundleService } from './services/diagnostics-bundle.service';
+import { CrossDomainIntegrityService } from './services/cross-domain-integrity.service';
+import { AdminActionApproval } from './entities/admin-action-approval.entity';
 
 @Module({
   imports: [
@@ -47,6 +49,7 @@ import { DiagnosticsBundleService } from './services/diagnostics-bundle.service'
       TemplateVersion,      // Added
       StellarAnchor,
       SorobanEventCheckpoint,
+      AdminActionApproval,
     ]),
     AuthModule,
     UserModule,
@@ -70,6 +73,7 @@ import { DiagnosticsBundleService } from './services/diagnostics-bundle.service'
     Reflector,
     TemplatesService, // Added
     DiagnosticsBundleService,
+    CrossDomainIntegrityService,
   ],
   exports: [
     AdminService, 
@@ -77,6 +81,7 @@ import { DiagnosticsBundleService } from './services/diagnostics-bundle.service'
     ModerationTemplateService, 
     TemplatesService, // Added
     DiagnosticsBundleService,
+    CrossDomainIntegrityService,
   ],
 })
 export class AdminModule {}

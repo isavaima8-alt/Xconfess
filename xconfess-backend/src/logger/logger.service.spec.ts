@@ -40,4 +40,36 @@ describe('AppLogger', () => {
 
     expect(sanitized.details.serverSecret).toBe('[REDACTED]');
   });
+
+  it('restricts metric labels to the approved low-cardinality vocabulary', () => {
+    service.incrementCounter('notification_queue_enqueued_total', 1, {
+      queue: 'notifications',
+      notificationType: 'user-1234',
+      userId: '1234',
+    });
+
+    expect(service.getMetricsSnapshot().counters[0]).toMatchObject({
+      labels: {
+        notificationType: 'other',
+        queue: 'notifications',
+      },
+    });
+    expect(JSON.stringify(service.getMetricsSnapshot())).not.toContain('1234');
+  });
+
+  it('restricts metric labels to the approved low-cardinality vocabulary', () => {
+    service.incrementCounter('notification_queue_enqueued_total', 1, {
+      queue: 'notifications',
+      notificationType: 'user-1234',
+      userId: '1234',
+    });
+
+    expect(service.getMetricsSnapshot().counters[0]).toMatchObject({
+      labels: {
+        notificationType: 'other',
+        queue: 'notifications',
+      },
+    });
+    expect(JSON.stringify(service.getMetricsSnapshot())).not.toContain('1234');
+  });
 });
