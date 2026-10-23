@@ -1,6 +1,8 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { UserController } from './user.controller';
 import { UserService } from './user.service';
+import { StepUpGuard } from '../auth/guards/step-up.guard';
+import { StepUpService } from '../auth/step-up.service';
 
 describe('UserController', () => {
   let controller: UserController;
@@ -13,12 +15,24 @@ describe('UserController', () => {
     getUserConfessionsList: jest.fn(),
     updateSettings: jest.fn(),
     deleteAccount: jest.fn(),
+    getPrivacySettings: jest.fn(),
+    updatePrivacySettings: jest.fn(),
+    updatePassword: jest.fn(),
+    regenerateRecoveryCodes: jest.fn(),
+    revokeRecoveryCodes: jest.fn(),
+    disableTotp: jest.fn(),
   };
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       controllers: [UserController],
-      providers: [{ provide: UserService, useValue: mockUserService }],
+      providers: [
+        { provide: UserService, useValue: mockUserService },
+        {
+          provide: StepUpService,
+          useValue: { assertValidProof: jest.fn() },
+        },
+      ],
     }).compile();
 
     controller = module.get<UserController>(UserController);
@@ -27,6 +41,71 @@ describe('UserController', () => {
 
   it('is defined', () => {
     expect(controller).toBeDefined();
+  });
+
+  it('loads privacy settings for the authenticated account', async () => {
+    const result = { isDiscoverable: true };
+    mockUserService.getPrivacySettings.mockResolvedValue(result);
+
+    await expect(
+      controller.getPrivacySettings({ user: { id: 42 } }),
+    ).resolves.toBe(result);
+    expect(mockUserService.getPrivacySettings).toHaveBeenCalledWith(42);
+  });
+
+  it('updates privacy only for the authenticated account', async () => {
+    const dto = { isDiscoverable: false };
+    const result = { ...dto };
+    mockUserService.updatePrivacySettings.mockResolvedValue(result);
+
+    await expect(
+      controller.updatePrivacySettings(dto, { user: { id: 42 } }),
+    ).resolves.toBe(result);
+    expect(mockUserService.updatePrivacySettings).toHaveBeenCalledWith(42, dto);
+    expect(
+      Reflect.getMetadata(
+        '__guards__',
+        UserController.prototype.updatePrivacySettings,
+      ),
+    ).toContain(StepUpGuard);
+  });
+
+  it('changes a password only after step-up authorization', async () => {
+    const dto = { newPassword: 'GoodPass123!' };
+
+    await expect(
+      controller.changePassword(dto, { user: { id: 42 } }),
+    ).resolves.toEqual({ message: 'Password has been updated.' });
+    expect(mockUserService.updatePassword).toHaveBeenCalledWith(
+      42,
+      dto.newPassword,
+    );
+    expect(
+      Reflect.getMetadata('__guards__', UserController.prototype.changePassword),
+    ).toContain(StepUpGuard);
+  });
+
+  it('protects recovery-code and authenticator changes with step-up', () => {
+    for (const method of [
+      'regenerateRecoveryCodes',
+      'revokeRecoveryCodes',
+      'disableTotp',
+      'updateSettings',
+    ] as const) {
+      expect(
+        Reflect.getMetadata('__guards__', UserController.prototype[method]),
+      ).toContain(StepUpGuard);
+    }
+  });
+
+  it('returns regenerated recovery codes only to the authenticated account', async () => {
+    const codes = ['once-only'];
+    mockUserService.regenerateRecoveryCodes.mockResolvedValue(codes);
+
+    await expect(
+      controller.regenerateRecoveryCodes({ user: { id: 42 } }),
+    ).resolves.toEqual({ recoveryCodes: codes });
+    expect(mockUserService.regenerateRecoveryCodes).toHaveBeenCalledWith(42);
   });
 
   it('returns public profile data', async () => {

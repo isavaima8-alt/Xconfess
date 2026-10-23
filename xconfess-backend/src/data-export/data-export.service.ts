@@ -12,14 +12,20 @@ import { ConfigService } from '@nestjs/config';
 import * as crypto from 'crypto';
 
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, Repository, MoreThan, IsNull, In } from 'typeorm';
+import {
+  Repository,
+  MoreThan,
+  IsNull,
+  In,
+  LessThan,
+} from 'typeorm';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { ExportRequest } from './entities/export-request.entity';
 import { ExportChunk } from './entities/export-chunk.entity';
 import { AuditLogService } from '../audit-log/audit-log.service';
 import { EXPORT_QUEUE_NAME } from './data-export.constants';
-import { User } from '../user/entities/user.entity';
+import { CorrelationContext } from '../common/correlation/correlation.context';
 
 export type ExportHistoryStatus =
   | 'PENDING'
@@ -157,6 +163,7 @@ export class DataExportService {
     await this.exportQueue.add('process-export', {
       userId,
       requestId: request.id,
+      correlationId: CorrelationContext.getOrGenerateRequestId(),
     });
 
     return { requestId: request.id, status: 'PENDING', queuedAt: now };
@@ -166,18 +173,19 @@ export class DataExportService {
    * Called by the processor as soon as it picks up the job.
    * Transitions status to PROCESSING and stamps processingAt.
    */
-  async markExportProcessing(
-    requestId: string,
-    privacySnapshotVersion: string,
-  ): Promise<boolean> {
+  async markExportProcessing(requestId: string): Promise<boolean> {
     const now = new Date();
+    const staleProcessingBefore = new Date(now.getTime() - 30 * 60 * 1000);
     const result = await this.exportRepository.update(
-      { id: requestId, status: In(['PENDING', 'FAILED']) },
-      {
-        status: 'PROCESSING',
-        processingAt: now,
-        privacySnapshotVersion,
-      },
+      [
+        { id: requestId, status: In(['PENDING', 'FAILED']) },
+        {
+          id: requestId,
+          status: 'PROCESSING',
+          processingAt: LessThan(staleProcessingBefore),
+        },
+      ],
+      { status: 'PROCESSING', processingAt: now },
     );
     return (result.affected ?? 0) > 0;
   }
@@ -196,12 +204,15 @@ export class DataExportService {
     });
     const retryCount = (current?.retryCount ?? 0) + 1;
 
-    await this.exportRepository.update({ id: requestId, status: 'PROCESSING' }, {
-      status: 'FAILED',
-      failedAt: now,
-      retryCount,
-      lastFailureReason: reason,
-    });
+    await this.exportRepository.update(
+      { id: requestId, status: 'PROCESSING' },
+      {
+        status: 'FAILED',
+        failedAt: now,
+        retryCount,
+        lastFailureReason: reason,
+      },
+    );
   }
 
   async generateSignedDownloadUrl(
@@ -449,7 +460,7 @@ export class DataExportService {
       where: { id: requestId, userId },
     });
 
-    if (!request) {
+    if (!request || request.status !== 'READY' || !request.isChunked) {
       throw new NotFoundException('Export request not found or unauthorized');
     }
 
@@ -484,7 +495,21 @@ export class DataExportService {
       );
     }
 
-    await this.cancelExportForPrivacyChange(requestId, 'cancelled_by_user');
+    const cancellation = await this.exportRepository.update(
+      { id: requestId, userId, status: In(['PENDING', 'PROCESSING']) },
+      {
+        status: 'CANCELLED' as any,
+        lastFailureReason: 'cancelled_by_user',
+      },
+    );
+    if (!cancellation.affected) {
+      throw new BadRequestException(
+        'The export is no longer cancellable.',
+      );
+    }
+
+    // Delete any partial chunks so partial artifacts are never accessible.
+    await this.chunkRepository.delete({ exportRequestId: requestId });
 
     await this.auditLogService
       ?.logExportLifecycleEvent({

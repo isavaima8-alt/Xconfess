@@ -16,7 +16,7 @@ export class ModerationService {
   ) {}
 
   async logAction(
-    adminId: number,
+    adminId: number | null,
     action: AuditActionType,
     entityType: string | null,
     entityId: string | null,

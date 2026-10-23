@@ -24,11 +24,21 @@ export class EmailNotificationService {
       host: this.configService.get<string>('SMTP_HOST'),
       port: this.configService.get<number>('SMTP_PORT'),
       secure: this.configService.get<string>('SMTP_SECURE') === 'true',
+      connectionTimeout: this.getSmtpTimeout('MAIL_CONNECTION_TIMEOUT_MS', 5000),
+      greetingTimeout: this.getSmtpTimeout('MAIL_GREETING_TIMEOUT_MS', 5000),
+      socketTimeout: this.getSmtpTimeout('MAIL_SOCKET_TIMEOUT_MS', 10000),
       auth: {
         user: this.configService.get<string>('SMTP_USER'),
         pass: this.configService.get<string>('SMTP_PASS'),
       },
     });
+  }
+
+  private getSmtpTimeout(key: string, fallback: number): number {
+    const configured = Number(this.configService.get<number>(key, fallback));
+    return Number.isFinite(configured)
+      ? Math.min(30000, Math.max(500, configured))
+      : fallback;
   }
 
   async sendEmail(data: NotificationJobData) {

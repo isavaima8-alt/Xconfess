@@ -1,4 +1,4 @@
-import { IsOptional, IsString, MinLength, MaxLength, ValidateIF } from 'class-validator';
+import { IsOptional, IsString, MinLength, MaxLength } from 'class-validator';
 
 /**
  * Payload for {@link AuthController.stepUp}. Exactly one of `password` or
@@ -11,7 +11,7 @@ import { IsOptional, IsString, MinLength, MaxLength, ValidateIF } from 'class-va
  */
 export class StepUpDto {
   @IsOptional()
-  @IsString( { message: 'Password must be a string' })
+  @IsString({ message: 'Password must be a string' })
   @MinLength(1, { message: 'Password must not be empty' })
   password?: string;
 
@@ -20,6 +20,12 @@ export class StepUpDto {
   @MinLength(6, { message: 'TOTP must be 6 digits' })
   @MaxLength(10, { message: 'TOTP token is too long' })
   totpToken?: string;
+
+  @IsOptional()
+  @IsString({ message: 'Recovery code must be a string' })
+  @MinLength(8, { message: 'Recovery code is too short' })
+  @MaxLength(64, { message: 'Recovery code is too long' })
+  recoveryCode?: string;
 
   /**
    * Base64url-encoded WebAuthn assertion response (PublicKeyCredential.json).
@@ -35,7 +41,7 @@ export class StepUpDto {
    * Required when `webAuthnAssertion` is present so replayed assertions can be rejected.
    */
   @IsOptional()
-  @IsString( { message: 'WebAuthn challenge id must be a string' })
+  @IsString({ message: 'WebAuthn challenge id must be a string' })
   @MinLength(1, { message: 'WebAuthn challenge id must not be empty' })
   webAuthnChallengeId?: string;
 }

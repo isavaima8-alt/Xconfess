@@ -312,6 +312,96 @@ describe('MigrationVerificationService', () => {
     });
   });
 
+  describe('checkMigrationDrift', () => {
+    function createDriftService(options: {
+      applied?: string[];
+      registered?: string[];
+      schemaChanges?: string[];
+      queryFailure?: Error;
+    } = {}) {
+      const queryRunner = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        startTransaction: jest.fn().mockResolvedValue(undefined),
+        query: jest.fn().mockImplementation((sql: string) => {
+          if (sql === 'SET TRANSACTION READ ONLY') {
+            if (options.queryFailure) return Promise.reject(options.queryFailure);
+            return Promise.resolve([]);
+          }
+          return Promise.resolve(
+            (options.applied || ['MigrationOne']).map((name) => ({ name })),
+          );
+        }),
+        hasTable: jest.fn().mockResolvedValue(true),
+        commitTransaction: jest.fn().mockResolvedValue(undefined),
+        rollbackTransaction: jest.fn().mockResolvedValue(undefined),
+        isTransactionActive: true,
+        release: jest.fn().mockResolvedValue(undefined),
+      };
+      const dataSource = {
+        createQueryRunner: jest.fn().mockReturnValue(queryRunner),
+        options: { migrationsTableName: 'migrations' },
+        migrations: (options.registered || ['MigrationOne']).map((name) => ({ name })),
+        driver: {
+          createSchemaBuilder: () => ({
+            log: jest.fn().mockResolvedValue({
+              upQueries: (options.schemaChanges || []).map((query) => ({ query })),
+            }),
+          }),
+        },
+      };
+      return {
+        service: new MigrationVerificationService(dataSource as never),
+        queryRunner,
+      };
+    }
+
+    it('checks migration history and metadata diff in a read-only transaction', async () => {
+      const { service, queryRunner } = createDriftService();
+
+      const result = await service.checkMigrationDrift();
+
+      expect(result).toEqual({
+        ok: true,
+        pendingMigrations: [],
+        unknownAppliedMigrations: [],
+        schemaChanges: [],
+      });
+      expect(queryRunner.query).toHaveBeenCalledWith('SET TRANSACTION READ ONLY');
+      expect(queryRunner.commitTransaction).toHaveBeenCalled();
+      expect(queryRunner.release).toHaveBeenCalled();
+    });
+
+    it('reports pending and unknown applied migrations plus schema drift', async () => {
+      const { service } = createDriftService({
+        applied: ['MigrationOne', 'RemovedMigration'],
+        registered: ['MigrationOne', 'MigrationTwo'],
+        schemaChanges: ['ALTER TABLE "users" ADD "role" text DEFAULT \'private\''],
+      });
+
+      const result = await service.checkMigrationDrift();
+
+      expect(result.ok).toBe(false);
+      expect(result.pendingMigrations).toEqual(['MigrationTwo']);
+      expect(result.unknownAppliedMigrations).toEqual(['RemovedMigration']);
+      expect(result.schemaChanges).toEqual([
+        'ALTER TABLE "users" ADD "role" text DEFAULT \'[redacted]\'',
+      ]);
+    });
+
+    it('suppresses database error details in diagnostics', async () => {
+      const { service, queryRunner } = createDriftService({
+        queryFailure: new Error('password=private-value'),
+      });
+
+      const result = await service.checkMigrationDrift();
+
+      expect(result.ok).toBe(false);
+      expect(result.queryError).toContain('detailed errors are suppressed');
+      expect(result.queryError).not.toContain('private-value');
+      expect(queryRunner.rollbackTransaction).toHaveBeenCalled();
+    });
+  });
+
   // ── REQUIRED_CONFESSION_COLUMNS / REQUIRED_CONFESSION_INDEXES constants ─────
 
   describe('exported constants', () => {

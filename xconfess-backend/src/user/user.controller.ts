@@ -17,11 +17,76 @@ import { OwnershipGuard } from '../common/guards/ownership.guard';
 import { Ownership } from '../common/decorators/ownership.decorator';
 import { UserService } from './user.service';
 import { UpdatePersonalizationDto } from './dto/update-personalization.dto';
+import {
+  UpdatePrivacySettingsDto,
+  PrivacySettingsResponseDto,
+} from './dto/update-privacy-settings.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
+import { StepUpGuard } from '../auth/guards/step-up.guard';
 
 @Controller('users')
 @UseGuards(JwtAuthGuard)
 export class UserController {
   constructor(private readonly userService: UserService) {}
+
+  @Get('privacy-settings')
+  async getPrivacySettings(@Req() request: any): Promise<PrivacySettingsResponseDto> {
+    return this.userService.getPrivacySettings(
+      Number(request.user?.id ?? request.user?.sub),
+    );
+  }
+
+  @Patch('privacy-settings')
+  @UseGuards(StepUpGuard)
+  async updatePrivacySettings(
+    @Body() dto: UpdatePrivacySettingsDto,
+    @Req() request: any,
+  ): Promise<PrivacySettingsResponseDto> {
+    return this.userService.updatePrivacySettings(
+      Number(request.user?.id ?? request.user?.sub),
+      dto,
+    );
+  }
+
+  @Patch('me/password')
+  @UseGuards(StepUpGuard)
+  async changePassword(
+    @Body() dto: ChangePasswordDto,
+    @Req() request: any,
+  ): Promise<{ message: string }> {
+    await this.userService.updatePassword(
+      Number(request.user?.id ?? request.user?.sub),
+      dto.newPassword,
+    );
+    return { message: 'Password has been updated.' };
+  }
+
+  @Post('me/recovery-codes')
+  @UseGuards(StepUpGuard)
+  async regenerateRecoveryCodes(@Req() request: any): Promise<{ recoveryCodes: string[] }> {
+    const recoveryCodes = await this.userService.regenerateRecoveryCodes(
+      Number(request.user?.id ?? request.user?.sub),
+    );
+    return { recoveryCodes };
+  }
+
+  @Delete('me/recovery-codes')
+  @UseGuards(StepUpGuard)
+  async revokeRecoveryCodes(@Req() request: any): Promise<{ message: string }> {
+    await this.userService.revokeRecoveryCodes(
+      Number(request.user?.id ?? request.user?.sub),
+    );
+    return { message: 'Recovery codes have been revoked.' };
+  }
+
+  @Delete('me/totp')
+  @UseGuards(StepUpGuard)
+  async disableTotp(@Req() request: any): Promise<{ message: string }> {
+    await this.userService.disableTotp(
+      Number(request.user?.id ?? request.user?.sub),
+    );
+    return { message: 'Two-factor authentication has been disabled.' };
+  }
 
   /** Get authenticated user's block/mute preferences */
   @Get('me/blocks-mutes')
@@ -158,7 +223,7 @@ export class UserController {
    * Ownership enforced independently at backend.
    */
   @Patch(':userId/settings')
-  @UseGuards(OwnershipGuard)
+  @UseGuards(OwnershipGuard, StepUpGuard)
   @Ownership({ paramKey: 'userId' })
   async updateSettings(
     @Param('userId') userId: string,

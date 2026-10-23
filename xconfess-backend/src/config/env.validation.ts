@@ -62,6 +62,11 @@ export const envValidationSchema = Joi.object({
     .default('development'),
   APP_ENV: Joi.string().optional(),
   PORT: Joi.number().port().default(3000),
+  MODERATION_PROVIDER_TIMEOUT_MS: Joi.number().min(500).max(10000).default(5000),
+  MODERATION_PROVIDER_MAX_ATTEMPTS: Joi.number().integer().min(1).max(3).default(2),
+  MAIL_CONNECTION_TIMEOUT_MS: Joi.number().min(500).max(30000).default(5000),
+  MAIL_GREETING_TIMEOUT_MS: Joi.number().min(500).max(30000).default(5000),
+  MAIL_SOCKET_TIMEOUT_MS: Joi.number().min(500).max(30000).default(10000),
 
   // â”€â”€ Database â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   DB_HOST: Joi.string().required().messages({
@@ -91,6 +96,11 @@ export const envValidationSchema = Joi.object({
   TYPEORM_BASELINE_EXISTING_SCHEMA: Joi.string()
     .valid('true', 'false', '1', '0', 'yes', 'no', 'on', 'off')
     .optional(),
+  ADMIN_ACTION_APPROVAL_TTL_MINUTES: Joi.number()
+    .integer()
+    .min(5)
+    .max(1440)
+    .default(30),
 
   // ---- Auth ----
   JWT_SECRET: Joi.string().min(32).required().messages({
@@ -99,6 +109,11 @@ export const envValidationSchema = Joi.object({
     'string.min':
       'JWT_SECRET must be at least 32 characters long for production-strength signing.',
   }),
+  STEP_UP_PROOF_TTL_SECONDS: Joi.number()
+    .integer()
+    .min(60)
+    .max(900)
+    .default(300),
 
   // ---- App / URLs ----
   APP_SECRET: Joi.string()
@@ -438,6 +453,22 @@ export const envValidationSchema = Joi.object({
 
   // â”€â”€ Redis queue health â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   REDIS_QUEUE_LATENCY_THRESHOLD_MS: Joi.number().default(250),
+  REDIS_QUEUE_WAIT_THRESHOLD_MS: Joi.number().integer().min(1).default(30000),
+  NOTIFICATION_WORKER_CONCURRENCY: Joi.number()
+    .integer()
+    .min(1)
+    .max(100)
+    .default(5),
+  EXPORT_WORKER_CONCURRENCY: Joi.number()
+    .integer()
+    .min(1)
+    .max(100)
+    .default(1),
+  CONFESSION_DRAFT_WORKER_CONCURRENCY: Joi.number()
+    .integer()
+    .min(1)
+    .max(100)
+    .default(1),
 
   // â”€â”€ Soroban event range verifier (read-only) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   SOROBAN_EVENT_VERIFIER_ENABLED: Joi.string()

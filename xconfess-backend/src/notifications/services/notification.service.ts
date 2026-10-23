@@ -13,6 +13,7 @@ import { Queue } from 'bullmq';
 import { AppLogger } from '../../logger/logger.service';
 import { ConfigService } from '@nestjs/config';
 import { User } from '../../user/entities/user.entity';
+import { CorrelationContext } from '../../common/correlation/correlation.context';
 import {
   NotificationDeliveryOutcome,
   NotificationDeliveryState,
@@ -157,6 +158,7 @@ export class NotificationService {
       {
         ...payload,
         type,
+        correlationId: CorrelationContext.getOrGenerateRequestId(),
       },
       { jobId },
     );

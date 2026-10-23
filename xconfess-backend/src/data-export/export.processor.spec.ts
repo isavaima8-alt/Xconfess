@@ -33,8 +33,6 @@ describe('ExportProcessor', () => {
       convertToCsv: jest.fn(() => 'test,csv'),
       markExportFailed: jest.fn(),
       markExportProcessing: jest.fn().mockResolvedValue(true),
-      getExportPrivacySnapshotVersion: jest.fn().mockResolvedValue('snapshot-v1'),
-      cancelExportForPrivacyChange: jest.fn().mockResolvedValue(undefined),
       isExportCancelled: jest.fn(async () => false), // Issue #106: cancellation check
     };
     exportRepo.update.mockResolvedValue({ affected: 1 });
@@ -101,7 +99,7 @@ describe('ExportProcessor', () => {
         'snapshot-v1',
       );
       expect(exportRepo.update).toHaveBeenCalledWith(
-        { id: 'req-1', status: 'PROCESSING', privacySnapshotVersion: 'snapshot-v1' },
+        { id: 'req-1', status: 'PROCESSING' },
         expect.objectContaining({
           status: 'READY',
           isChunked: true,
@@ -164,7 +162,9 @@ describe('ExportProcessor', () => {
         new Error('DB connection lost'),
       );
 
-      await expect(processor.process(mockJob)).rejects.toThrow('DB connection lost');
+      await expect(processor.process(mockJob)).rejects.toThrow(
+        'DB connection lost',
+      );
 
       expect(dataExportService.markExportFailed).toHaveBeenCalledWith(
         'req-err',
@@ -172,38 +172,15 @@ describe('ExportProcessor', () => {
       );
     });
 
-    it('cancels and removes partial chunks when privacy changes during compilation', async () => {
-      const mockJob = {
-        name: 'process-export',
-        data: { userId: '1', requestId: 'req-race' },
-      } as Job;
-      dataExportService.getExportPrivacySnapshotVersion
-        .mockResolvedValueOnce('snapshot-v1')
-        .mockResolvedValueOnce('snapshot-v2');
-      dataExportService.compileUserData.mockResolvedValue({
-        userId: '1',
-        confessions: [],
-      });
-
-      await processor.process(mockJob);
-
-      expect(dataExportService.cancelExportForPrivacyChange).toHaveBeenCalledWith(
-        'req-race',
-      );
-      expect(chunkRepo.save).not.toHaveBeenCalled();
-      expect(exportRepo.update).not.toHaveBeenCalledWith(
-        expect.objectContaining({ id: 'req-race' }),
-        expect.objectContaining({ status: 'READY' }),
-      );
-    });
-
-    it('should skip processing for non-process-export job names', async () => {
+    it('should reject non-process-export job names', async () => {
       const mockJob = {
         name: 'other-job',
         data: { userId: '1', requestId: 'req-skip' },
       } as Job;
 
-      await processor.process(mockJob);
+      await expect(processor.process(mockJob)).rejects.toThrow(
+        'Unsupported export job name',
+      );
 
       expect(dataExportService.markExportProcessing).not.toHaveBeenCalled();
       expect(dataExportService.markExportFailed).not.toHaveBeenCalled();

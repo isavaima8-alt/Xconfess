@@ -87,6 +87,16 @@ export function resolveBackendRoute(
   };
 }
 
+export function getSessionAuthorization(request: Request): string | undefined {
+  const sessionCookie = request.headers
+    .get('cookie')
+    ?.split(';')
+    .map((cookie) => cookie.trim())
+    .find((cookie) => cookie.startsWith('xconfess_session='));
+  const token = sessionCookie?.slice('xconfess_session='.length);
+  return token ? `Bearer ${token}` : undefined;
+}
+
 function resolveFrontendHosts(requestUrl: URL): Set<string> {
   const hosts = new Set<string>([requestUrl.host.toLowerCase()]);
 

@@ -83,14 +83,38 @@ Resolve multiple reports at once.
 ### Confessions
 
 #### DELETE /api/admin/confessions/:id
-Delete a confession (soft delete).
+Deprecated direct deletion endpoint. It returns `409
+ADMIN_ACTION_APPROVAL_REQUIRED` and never deletes the confession. Confession
+deletion is currently the only eligible high-impact admin action and requires
+approval by a different admin.
 
-**Body:**
+#### GET /api/admin/action-approvals
+List up to 100 pending high-impact action requests in request order.
+
+#### POST /api/admin/action-approvals
+Request a high-impact admin action. Admin authentication is required; this
+endpoint does not execute the action.
+
 ```json
 {
-  "reason": "Optional reason for deletion"
+  "action": "confession.delete",
+  "targetId": "confession-uuid",
+  "reason": "Policy and evidence supporting deletion"
 }
 ```
+
+Requests expire after `ADMIN_ACTION_APPROVAL_TTL_MINUTES` (default `30`,
+allowed range `5` to `1440`). The requestor cannot approve their own request.
+
+#### POST /api/admin/action-approvals/:id/approve
+Approve and execute a pending request. The approving admin must be different
+from the requester and provide recent step-up proof. Approval, soft deletion,
+and their audit records commit atomically.
+
+#### POST /api/admin/action-approvals/:id/cancel
+Cancel a pending request created by the calling admin. Recent step-up proof is
+required. An expired request returns `410 Gone`; terminal requests return
+`409 Conflict`.
 
 #### PATCH /api/admin/confessions/:id/hide
 Hide a confession from public view.
@@ -238,4 +262,3 @@ All endpoints may return:
 
 ## Rate Limiting
 Admin endpoints are subject to the same rate limiting as other endpoints (configured via ThrottlerModule).
-

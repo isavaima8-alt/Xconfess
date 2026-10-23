@@ -1,7 +1,7 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job } from 'bullmq';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { MoreThanOrEqual, Repository } from 'typeorm';
 import archiver from 'archiver';
 import * as crypto from 'crypto';
 import { Writable } from 'stream';
@@ -13,8 +13,11 @@ import { EmailService } from '../email/email.service';
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { EXPORT_QUEUE_NAME } from './data-export.constants';
+import { QUEUE_WORKER_CONCURRENCY } from '../config/queue-concurrency.config';
 
-@Processor(EXPORT_QUEUE_NAME)
+@Processor(EXPORT_QUEUE_NAME, {
+  concurrency: QUEUE_WORKER_CONCURRENCY[EXPORT_QUEUE_NAME],
+})
 export class ExportProcessor extends WorkerHost {
   private readonly logger = new Logger(ExportProcessor.name);
   private readonly CHUNK_SIZE_LIMIT = 10 * 1024 * 1024; // 10MB per chunk
@@ -34,7 +37,9 @@ export class ExportProcessor extends WorkerHost {
   }
 
   async process(job: Job<{ userId: string; requestId: string }>) {
-    if (job.name !== 'process-export') return;
+    if (job.name !== 'process-export') {
+      throw new Error(`Unsupported export job name: ${job.name}`);
+    }
     const { userId, requestId } = job.data;
 
     try {
@@ -58,11 +63,9 @@ export class ExportProcessor extends WorkerHost {
       }
 
       // Stamp processingAt and flip status to PROCESSING
-      const processingStarted = await this.dataExportService.markExportProcessing(
-        requestId,
-        privacySnapshotVersion,
-      );
-      if (!processingStarted) return;
+      const ownsProcessingLease =
+        await this.dataExportService.markExportProcessing(requestId);
+      if (!ownsProcessingLease) return;
 
       // Issue #106: check for cancellation before doing expensive work
       if (await this.dataExportService.isExportCancelled(requestId)) {
@@ -83,44 +86,31 @@ export class ExportProcessor extends WorkerHost {
         return;
       }
 
-      // Clear any partial chunks left behind by a previous failed attempt so
-      // retries after a Redis outage do not accumulate duplicate chunk rows.
-      await this.chunkRepository.delete({ exportRequestId: requestId });
-
       const result = await this.generateChunkedZip(requestId, data);
 
-      if (
-        (await this.dataExportService.isExportCancelled(requestId)) ||
-        (await this.dataExportService.getExportPrivacySnapshotVersion(userId)) !==
-          privacySnapshotVersion
-      ) {
-        await this.dataExportService.cancelExportForPrivacyChange(requestId);
+      if (await this.dataExportService.isExportCancelled(requestId)) {
+        await this.chunkRepository.delete({ exportRequestId: requestId });
         return;
       }
 
-      const now = new Date();
-      const published = await this.exportRepository.update(
-        { id: requestId, status: 'PROCESSING', privacySnapshotVersion },
+      await this.chunkRepository.delete({
+        exportRequestId: requestId,
+        chunkIndex: MoreThanOrEqual(result.chunkCount),
+      });
+      const completedAt = new Date();
+      const finalized = await this.exportRepository.update(
+        { id: requestId, status: 'PROCESSING' },
         {
           status: 'READY',
-          completedAt: now,
           isChunked: true,
           chunkCount: result.chunkCount,
           totalSize: result.totalSize.toString(),
           combinedChecksum: result.combinedChecksum,
+          completedAt,
         },
       );
-      if ((published.affected ?? 0) === 0) {
-        await this.dataExportService.cancelExportForPrivacyChange(requestId);
-        return;
-      }
-
-      if (
-        (await this.dataExportService.isExportCancelled(requestId)) ||
-        (await this.dataExportService.getExportPrivacySnapshotVersion(userId)) !==
-          privacySnapshotVersion
-      ) {
-        await this.dataExportService.cancelExportForPrivacyChange(requestId);
+      if (!finalized.affected) {
+        await this.chunkRepository.delete({ exportRequestId: requestId });
         return;
       }
 
@@ -138,6 +128,11 @@ export class ExportProcessor extends WorkerHost {
         `Chunked export ${requestId} completed with ${result.chunkCount} chunks.`,
       );
     } catch (error) {
+      if (await this.dataExportService.isExportCancelled(requestId)) {
+        await this.chunkRepository.delete({ exportRequestId: requestId });
+        this.logger.log(`Export ${requestId} cancelled at a chunk checkpoint.`);
+        return;
+      }
       const message = error instanceof Error ? error.message : 'unknown error';
       this.logger.error(`Export ${requestId} failed: ${message}`);
       // Use the service helper so retryCount and lastFailureReason are persisted
@@ -165,16 +160,27 @@ export class ExportProcessor extends WorkerHost {
       let currentChunkSize = 0;
 
       const saveChunk = async (buffer: Buffer, index: number) => {
+        if (await this.dataExportService.isExportCancelled(requestId)) {
+          throw new Error('Export cancelled');
+        }
         const checksum = crypto
           .createHash('sha256')
           .update(buffer)
           .digest('hex');
+        await this.chunkRepository.delete({
+          exportRequestId: requestId,
+          chunkIndex: index,
+        });
         await this.chunkRepository.save({
           exportRequestId: requestId,
           chunkIndex: index,
           fileData: buffer,
           chunkSize: buffer.length,
           checksum,
+        });
+        await this.exportRepository.update(requestId, {
+          chunkCount: index + 1,
+          processingAt: new Date(),
         });
       };
 

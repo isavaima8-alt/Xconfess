@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import {
   Inject,
   Injectable,
@@ -373,6 +374,70 @@ export class UserService {
     }
   }
 
+  normalizeRecoveryCode(code: string): string {
+    return code.trim().replace(/\s+/g, '').toUpperCase();
+  }
+
+  hashRecoveryCode(code: string): string {
+    return CryptoUtil.hash(this.normalizeRecoveryCode(code));
+  }
+
+  generateRecoveryCodes(count = 10, codeLength = 16): string[] {
+    if (!Number.isInteger(count) || count <= 0) {
+      return [];
+    }
+
+    return Array.from({ length: count }, () => {
+      const raw = crypto.randomBytes(Math.max(8, Math.ceil(codeLength / 2))).toString('hex');
+      return raw.slice(0, codeLength).toUpperCase();
+    });
+  }
+
+  async storeRecoveryCodes(userId: number, codes: string[]): Promise<string[]> {
+    const user = await this.findById(userId);
+    if (!user) throw new NotFoundException('User not found');
+
+    const uniqueVerifiers = Array.from(
+      new Set(codes.map((code) => this.hashRecoveryCode(code))),
+    );
+    const enc = CryptoUtil.encrypt(JSON.stringify(uniqueVerifiers));
+    user.recoveryCodesEncrypted = enc.encrypted;
+    user.recoveryCodesIv = enc.iv;
+    user.recoveryCodesTag = enc.tag;
+
+    try {
+      await this.userRepository.save(user);
+      return codes;
+    } catch (e) {
+      throw new InternalServerErrorException('Failed to store recovery codes');
+    }
+  }
+
+  async regenerateRecoveryCodes(userId: number): Promise<string[]> {
+    const user = await this.findById(userId);
+    if (!user) throw new NotFoundException('User not found');
+    if (!user.totpEnabled) {
+      throw new BadRequestException(
+        'Authenticator-based two-factor authentication must be enabled first',
+      );
+    }
+
+    const codes = this.generateRecoveryCodes();
+    const verifiers = Array.from(
+      new Set(codes.map((code) => this.hashRecoveryCode(code))),
+    );
+    const enc = CryptoUtil.encrypt(JSON.stringify(verifiers));
+    user.recoveryCodesEncrypted = enc.encrypted;
+    user.recoveryCodesIv = enc.iv;
+    user.recoveryCodesTag = enc.tag;
+    try {
+      await this.userRepository.save(user);
+    } catch {
+      throw new InternalServerErrorException('Failed to regenerate recovery codes');
+    }
+    return codes;
+  }
+
   async setRecoveryCodes(userId: number, encrypted: string, iv: string, tag: string): Promise<void> {
     const user = await this.findById(userId);
     if (!user) throw new NotFoundException('User not found');
@@ -386,39 +451,71 @@ export class UserService {
     }
   }
 
-  async consumeRecoveryCode(userId: number, code: string): Promise<boolean> {
+  async revokeRecoveryCodes(userId: number): Promise<void> {
     const user = await this.findById(userId);
     if (!user) throw new NotFoundException('User not found');
-    if (!user.recoveryCodesEncrypted) return false;
 
-    const { CryptoUtil } = require('../common/crypto.util');
-    let codes: string[] = [];
-    try {
-      const decrypted = CryptoUtil.decrypt(
-        user.recoveryCodesEncrypted,
-        user.recoveryCodesIv || '',
-        user.recoveryCodesTag || '',
-      );
-      codes = JSON.parse(decrypted) as string[];
-    } catch (e) {
-      return false;
-    }
-
-    const idx = codes.indexOf(code);
-    if (idx === -1) return false;
-
-    codes.splice(idx, 1);
+    user.recoveryCodesEncrypted = null;
+    user.recoveryCodesIv = null;
+    user.recoveryCodesTag = null;
 
     try {
-      const enc = CryptoUtil.encrypt(JSON.stringify(codes));
-      user.recoveryCodesEncrypted = enc.encrypted;
-      user.recoveryCodesIv = enc.iv;
-      user.recoveryCodesTag = enc.tag;
       await this.userRepository.save(user);
-      return true;
     } catch (e) {
+      throw new InternalServerErrorException('Failed to revoke recovery codes');
+    }
+  }
+
+  async consumeRecoveryCode(userId: number, code: string): Promise<boolean> {
+    const normalized = this.normalizeRecoveryCode(code);
+    if (!normalized) {
       return false;
     }
+
+    const hashedCode = this.hashRecoveryCode(normalized);
+
+    const runConsume = async (repo: Pick<Repository<User>, 'findOne' | 'save'>, useLock = false) => {
+      const user = await repo.findOne(User, {
+        where: { id: userId },
+        ...(useLock ? { lock: { mode: 'pessimistic_write' } } : {}),
+      } as any);
+
+      if (!user || !user.recoveryCodesEncrypted) {
+        return false;
+      }
+
+      try {
+        const decrypted = CryptoUtil.decrypt(
+          user.recoveryCodesEncrypted,
+          user.recoveryCodesIv || '',
+          user.recoveryCodesTag || '',
+        );
+        const verifiers = JSON.parse(decrypted) as string[];
+        const index = verifiers.findIndex((entry) => entry === hashedCode);
+
+        if (index === -1) {
+          return false;
+        }
+
+        verifiers.splice(index, 1);
+        const enc = CryptoUtil.encrypt(JSON.stringify(verifiers));
+        user.recoveryCodesEncrypted = enc.encrypted;
+        user.recoveryCodesIv = enc.iv;
+        user.recoveryCodesTag = enc.tag;
+        await repo.save(user);
+        return true;
+      } catch (e) {
+        return false;
+      }
+    };
+
+    if (this.userRepository.manager && typeof this.userRepository.manager.transaction === 'function') {
+      return this.userRepository.manager.transaction(async (manager) =>
+        runConsume(manager as any, true),
+      );
+    }
+
+    return runConsume(this.userRepository);
   }
 
   async getProfileSummary(userId: number, page = 1, limit = 10): Promise<any> {
@@ -864,6 +961,14 @@ export class UserService {
     userId: number,
     dto: Record<string, any>,
   ): Promise<User> {
+    const allowedKeys = new Set(['privacySettings', 'notificationPreferences']);
+    const unsupportedKeys = Object.keys(dto).filter(
+      (key) => !allowedKeys.has(key),
+    );
+    if (unsupportedKeys.length > 0) {
+      throw new BadRequestException('Unsupported account setting');
+    }
+
     const user = await this.findById(userId);
     if (!user) throw new NotFoundException('User not found');
 
@@ -879,16 +984,6 @@ export class UserService {
         ...user.notificationPreferences,
         ...dto.notificationPreferences,
       };
-    }
-
-    for (const key of Object.keys(dto)) {
-      if (
-        key !== 'privacySettings' &&
-        key !== 'notificationPreferences' &&
-        key in user
-      ) {
-        (user as any)[key] = dto[key];
-      }
     }
 
     await this.userRepository.save(user);

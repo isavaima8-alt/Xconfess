@@ -1,10 +1,10 @@
 import {
   CanActivate,
   Controller,
+  ConflictException,
   Delete,
   ExecutionContext,
   INestApplication,
-  Param,
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
@@ -38,8 +38,11 @@ const ADMIN_ID = 42;
 class TestAdminController {
   @Delete('confessions/:id')
   @UseGuards(StepUpGuard)
-  deleteConfession(@Param('id') id: string) {
-    return { message: 'Confession deleted successfully', id };
+  deleteConfession() {
+    throw new ConflictException({
+      code: 'ADMIN_ACTION_APPROVAL_REQUIRED',
+      message: 'A second administrator must approve this action.',
+    });
   }
 }
 
@@ -99,14 +102,14 @@ describe('Admin step-up authentication (e2e)', () => {
     await app.close();
   });
 
-  it('allows a destructive action with a valid step-up proof', async () => {
+  it('rejects direct deletion even with a valid step-up proof', async () => {
     const proof = signProof(ADMIN_ID);
 
     await request(app.getHttpServer())
       .delete('/api/admin/confessions/abc-123')
       .set('Authorization', 'Bearer admin-token')
       .set(STEP_UP_TOKEN_HEADER, proof)
-      .expect(200);
+      .expect(409);
   });
 
   it('rejects a destructive action without a step-up proof', async () => {

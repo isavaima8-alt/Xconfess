@@ -221,8 +221,12 @@ transaction and are atomic:
 - Admin report resolution and dismissal (`/api/admin/reports/:id/resolve`,
   `/api/admin/reports/:id/dismiss`)
 - Admin bulk report resolution (`/api/admin/reports/bulk-resolve`)
-- Admin confession actions (`DELETE /api/admin/confessions/:id`,
-  `/api/admin/confessions/:id/hide`, `/api/admin/confessions/:id/unhide`)
+- Admin confession deletion approval (request, second-admin approval, soft
+  deletion, and audit records) is atomic. The legacy
+  `DELETE /api/admin/confessions/:id` route is disabled and returns
+  `409 ADMIN_ACTION_APPROVAL_REQUIRED`.
+- Admin confession hiding and unhiding
+  (`/api/admin/confessions/:id/hide`, `/api/admin/confessions/:id/unhide`)
 - Admin user moderation actions (`/api/admin/users/:id/ban`,
   `/api/admin/users/:id/unban`)
 - Moderation webhook application (`POST /api/webhooks/moderation/results`)
@@ -334,7 +338,11 @@ The following list matches active `@Controller(...)` + method decorators.
 | PATCH | `/api/admin/reports/:id/resolve` |
 | PATCH | `/api/admin/reports/:id/dismiss` |
 | PATCH | `/api/admin/reports/bulk-resolve` |
-| DELETE | `/api/admin/confessions/:id` |
+| GET | `/api/admin/action-approvals` |
+| POST | `/api/admin/action-approvals` |
+| POST | `/api/admin/action-approvals/:id/approve` |
+| POST | `/api/admin/action-approvals/:id/cancel` |
+| DELETE | `/api/admin/confessions/:id` (deprecated; returns 409) |
 | PATCH | `/api/admin/confessions/:id/hide` |
 | PATCH | `/api/admin/confessions/:id/unhide` |
 | GET | `/api/admin/users/search` |

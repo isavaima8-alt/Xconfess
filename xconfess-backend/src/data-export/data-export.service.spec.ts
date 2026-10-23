@@ -189,10 +189,14 @@ describe('DataExportService', () => {
         }),
       );
 
-      expect(mockExportQueue.add).toHaveBeenCalledWith('process-export', {
-        userId: '42',
-        requestId: 'req-1',
-      });
+      expect(mockExportQueue.add).toHaveBeenCalledWith(
+        'process-export',
+        expect.objectContaining({
+          userId: '42',
+          requestId: 'req-1',
+          correlationId: expect.any(String),
+        }),
+      );
       expect(mockAuditLogService.logExportLifecycleEvent).toHaveBeenCalledWith(
         expect.objectContaining({
           action: 'request_created',
@@ -235,11 +239,12 @@ describe('DataExportService', () => {
       await service.markExportProcessing('req-proc-1', 'snapshot-v1');
 
       expect(mockExportRepository.update).toHaveBeenCalledWith(
-        { id: 'req-proc-1', status: expect.anything() },
+        expect.arrayContaining([
+          expect.objectContaining({ id: 'req-proc-1', status: 'PROCESSING' }),
+        ]),
         {
           status: 'PROCESSING',
           processingAt: new Date('2026-03-24T22:05:00.000Z'),
-          privacySnapshotVersion: 'snapshot-v1',
         },
       );
     } finally {

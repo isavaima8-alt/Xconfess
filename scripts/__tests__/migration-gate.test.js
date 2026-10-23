@@ -104,4 +104,23 @@ describe('migration-gate', () => {
       `Migration gate should pass on repo files. Errors:\n${stderr}`
     );
   });
+
+  it('does not authorize the deployed database check by default', () => {
+    const { code, stdout } = runGate(
+      { MIGRATION_GATE_DATABASE_CHECK: 'false' },
+      ['--dry-run', '--json']
+    );
+    const summary = JSON.parse(stdout);
+
+    assert.equal(code, 0);
+    assert.ok(
+      summary.findings.some(
+        (finding) =>
+          finding.check === 'schema-drift' &&
+          finding.severity === 'warning' &&
+          finding.message.includes('check skipped')
+      ),
+      'The default dry-run should report that database access was not authorized'
+    );
+  });
 });

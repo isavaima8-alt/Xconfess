@@ -33,6 +33,7 @@ import { StellarAnchor } from '../stellar/entities/stellar-anchor.entity';
 import { SorobanEventCheckpoint } from '../stellar/entities/soroban-event-checkpoint.entity';
 import { DiagnosticsBundleService } from './services/diagnostics-bundle.service';
 import { CrossDomainIntegrityService } from './services/cross-domain-integrity.service';
+import { AdminActionApproval } from './entities/admin-action-approval.entity';
 
 @Module({
   imports: [
@@ -48,6 +49,7 @@ import { CrossDomainIntegrityService } from './services/cross-domain-integrity.s
       TemplateVersion,      // Added
       StellarAnchor,
       SorobanEventCheckpoint,
+      AdminActionApproval,
     ]),
     AuthModule,
     UserModule,

@@ -88,6 +88,14 @@ Applying a change uses `POST /api/admin/moderation/config/thresholds` with the s
 
 Approved thresholds take effect in memory for the current backend process. `MODERATION_HIGH_THRESHOLD` and `MODERATION_MEDIUM_THRESHOLD` remain the startup baseline, so a process restart restores the configured values. In multi-instance deployments, route preview and approval to the same instance; otherwise approval fails closed if that instance has no matching preview.
 
+## Provider And Background-Job Reliability
+
+- `MODERATION_PROVIDER_TIMEOUT_MS` defaults to `5000` (bounded to `500`-`10000` ms), and `MODERATION_PROVIDER_MAX_ATTEMPTS` defaults to `2` (bounded to `1`-`3`). Retries use jitter and apply only to transient failures of side-effect-free moderation scoring calls; permanent 4xx responses are not retried. Provider metrics include only the provider and bounded outcome.
+- SMTP connection, greeting, and socket budgets are controlled by `MAIL_CONNECTION_TIMEOUT_MS` (`5000`), `MAIL_GREETING_TIMEOUT_MS` (`5000`), and `MAIL_SOCKET_TIMEOUT_MS` (`10000`), each bounded to `500`-`30000` ms. SMTP delivery is not automatically retried after an ambiguous send failure; only the existing configured provider fallback is used.
+- Performance measurements use matched route templates; unmatched routes are grouped under a fixed prefix. The logger accepts only its finite metric label vocabulary and caps each metric store at 1,000 series. Request IDs, user IDs, raw paths, query strings, and content are not metric labels.
+- Notification and export jobs carry a generated or request-scoped `correlationId`; workers bind it to async logging context, and notification retries/DLQ copies retain it. Do not put credentials or user content in this field.
+- Export jobs retry at most three times with exponential backoff. Chunk indexes are checkpoints: retries replace matching indexes and finalize only after generation completes; cancellation is checked before chunk writes and finalization. Chunk downloads are available only after `READY`.
+
 <p align="center">
   <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
 </p>
@@ -99,6 +107,31 @@ Approved thresholds take effect in memory for the current backend process. `MODE
 HTTP APIs are served only through NestJS: `main.ts` bootstraps `AppModule`, and every route is declared on Nest controllers inside feature modules (global prefix `api`). There is no parallel Express router tree; do not add handlers under orphaned `routes/` or `controllers/` folders.
 
 Shared cross-cutting middleware used at bootstrap lives under `src/middleware/` (for example `RequestIdMiddleware`). Feature code belongs in the module directories listed below.
+
+## Background job capacity and queue health
+
+Worker concurrency is bounded per queue so expensive export jobs cannot consume
+notification or confession-draft worker slots. These are per-worker settings;
+fleet capacity is the configured concurrency multiplied by the number of
+workers registered for that queue.
+
+| Environment variable | Default | Valid range | Queue/job |
+| --- | ---: | ---: | --- |
+| `NOTIFICATION_WORKER_CONCURRENCY` | `5` | `1`–`100` | `notifications` / `send-notification` |
+| `EXPORT_WORKER_CONCURRENCY` | `1` | `1`–`100` | `export-queue` / `process-export` |
+| `CONFESSION_DRAFT_WORKER_CONCURRENCY` | `1` | `1`–`100` | `confession-draft-publisher` |
+| `REDIS_QUEUE_WAIT_THRESHOLD_MS` | `30000` | positive integer | Oldest waiting job age before readiness degrades |
+
+All workers for a given queue should use the same concurrency setting so the
+capacity estimate in `/api/health/ready` remains meaningful. Its queue details
+include `waitMs`, estimated `capacity`, and `saturated`; saturation means the
+active count has filled estimated capacity while at least one job is waiting.
+Wait exceeding the configured threshold degrades readiness. Unsupported job
+names reject explicitly and remain subject to the queue's retry/failure policy.
+
+The authenticated API/controller remains the producer authorization boundary;
+do not enqueue jobs from an untrusted caller without enforcing ownership or
+administrative authorization there. See [queue readiness signals](../docs/HEALTH_ENDPOINT_QUICK_REFERENCE.md#what-gets-checked).
 
 ## Auth Endpoint Split (`/users/*` vs `/auth/*`)
 
@@ -205,7 +238,17 @@ APP_ENV=local
 TYPEORM_SYNCHRONIZE=false
 STELLAR_NETWORK=testnet
 STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org
+ENABLE_BACKGROUND_JOBS=true
+REPUTATION_RECONCILIATION_BATCH_SIZE=100
 ```
+
+The scheduled reputation reconciliation worker runs only when
+`ENABLE_BACKGROUND_JOBS=true`. It resumes from a database checkpoint, processes
+at most one batch per schedule, and clamps the configured batch size to 1-500.
+Apply the `CreateReputationReconciliationCheckpoints20261022000001` migration
+before enabling it in a deployed environment. Progress and failure events
+contain aggregate counts and generic error codes, not confession or transaction
+identifiers.
 
 ### TypeORM Synchronize Policy
 

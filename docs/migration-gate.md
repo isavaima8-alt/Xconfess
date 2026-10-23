@@ -58,6 +58,35 @@ Add the acknowledgement comment to the top of the migration file:
 Or set `ALLOW_UNSAFE_MIGRATIONS=true` when running the gate (CI only; do not
 use in production deploy scripts).
 
+### 4. Deployed schema drift (opt-in)
+
+The gate can make a read-only connection and compare the database's TypeORM
+migration records with the migrations registered by this checkout. It also asks
+TypeORM's schema builder for the DDL it would apply to bring the live schema in
+line with entity metadata; the DDL is reported, never executed. This catches
+unknown or missing migration records and physical schema changes that diverge
+from the current TypeORM model.
+
+The database check is deliberately skipped unless explicitly authorized:
+
+```bash
+MIGRATION_GATE_DATABASE_CHECK=true npm run migration:gate
+```
+
+Provide the normal `DB_HOST`, `DB_PORT`, `DB_USERNAME`, `DB_PASSWORD`, and
+`DB_NAME` settings for the backend. Use a database account with read-only
+permissions. The checker also disables TypeORM synchronization and automatic
+migration execution and sets PostgreSQL's `default_transaction_read_only` for
+its connections. A detected drift or connection/permission failure blocks the
+normal gate. With `--dry-run`, findings are printed but the command exits 0, as
+with the existing static checks. Database errors are intentionally summarized
+without printing connection details or raw driver messages.
+
+Schema comparison is against the currently registered TypeORM entity metadata;
+the migration ledger is compared to the committed migration classes. Any
+intentional schema change should be represented by a committed migration and
+the corresponding current entity metadata.
+
 ## Running the gate
 
 ```bash
@@ -99,8 +128,10 @@ If a migration fails on production:
 
 ## Assumptions & follow-up work
 
-- The gate does not connect to a live database.  It only performs static
-  analysis of migration files.
+- The deployed database check is opt-in and does not run in CI unless an
+  authorized database configuration is provided. Without the opt-in flag, the
+  gate performs static analysis only and reports that the live check was
+  skipped.
 - Online migration locking (advisory locks, `pg_try_advisory_lock`) and
   backward-compatibility validation against a test database are follow-up items.
 - Cross-directory duplicate timestamp detection (between `migrations/` and

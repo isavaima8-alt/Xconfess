@@ -16,6 +16,12 @@ const jobsEnabled = process.env.ENABLE_BACKGROUND_JOBS === 'true';
   imports: [
     BullModule.registerQueue({
       name: EXPORT_QUEUE_NAME,
+      defaultJobOptions: {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 1000 },
+        removeOnComplete: { count: 500 },
+        removeOnFail: false,
+      },
     }),
     TypeOrmModule.forFeature([ExportRequest, ExportChunk, User]),
     EmailModule,

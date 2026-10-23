@@ -1,4 +1,4 @@
-import { ForbiddenException } from "@nestjs/common";
+import { ForbiddenException, GoneException } from "@nestjs/common";
 import { AdminService } from "./admin.service";
 import { ModerationService } from "./moderation.service";
 import { BadRequestException, NotFoundException } from "@nestjs/common";
@@ -6,6 +6,17 @@ import { Report, ReportStatus } from "../entities/report.entity";
 import { AuditActionType } from "../../audit-log/audit-log.entity";
 import { AnonymousConfession } from "../../confession/entities/confession.entity";
 import { User } from "../../user/entities/user.entity";
+import {
+  AdminActionApproval,
+  AdminActionApprovalStatus,
+  AdminCriticalAction,
+} from "../entities/admin-action-approval.entity";
+
+jest.mock(
+  "../../auth/session.service",
+  () => ({ SessionService: class SessionService {} }),
+  { virtual: true },
+);
 
 function createChainableQB(overrides: Partial<any> = {}) {
   const qb: any = {
@@ -26,6 +37,8 @@ function createChainableQB(overrides: Partial<any> = {}) {
     getCount: jest.fn(),
     getRawMany: jest.fn(),
     getRawOne: jest.fn(),
+    setLock: jest.fn().mockReturnThis(),
+    setOnLocked: jest.fn().mockReturnThis(),
     ...overrides,
   };
   return qb;
@@ -94,13 +107,34 @@ describe("AdminService", () => {
     clearLockout: jest.fn(),
   };
 
+  const sessionService: any = {
+    revokeAllForUser: jest.fn(),
+    rotateAllForUser: jest.fn(),
+    listForUser: jest.fn(),
+  };
+
+  const actionApprovalRepository: any = {
+    create: jest.fn((approval: any) => approval),
+    save: jest.fn(),
+    find: jest.fn(),
+    findOne: jest.fn(),
+    createQueryBuilder: jest.fn(),
+    manager: {
+      transaction: jest.fn(),
+    },
+  };
+
   let service: AdminService;
 
   beforeEach(() => {
     jest.resetAllMocks();
+    actionApprovalRepository.create.mockImplementation((approval: any) => approval);
     reportRepository.manager.transaction.mockImplementation(async (work: any) =>
       work({
         getRepository: (entity: any) => {
+          if (entity === AdminActionApproval) {
+            return actionApprovalRepository;
+          }
           if (entity === Report) {
             return reportRepository;
           }
@@ -113,6 +147,23 @@ describe("AdminService", () => {
           return reportRepository;
         },
       }),
+    );
+    actionApprovalRepository.manager.transaction.mockImplementation(
+      async (work: any) =>
+        work({
+          getRepository: (entity: any) => {
+            if (entity === AdminActionApproval) {
+              return actionApprovalRepository;
+            }
+            if (entity === AnonymousConfession) {
+              return confessionRepository;
+            }
+            return reportRepository;
+          },
+        }),
+    );
+    configService.get.mockImplementation((key: string) =>
+      key === "ADMIN_ACTION_APPROVAL_TTL_MINUTES" ? 30 : "",
     );
     service = new AdminService(
       reportRepository,
@@ -127,6 +178,8 @@ describe("AdminService", () => {
       auditLogService,
       jobManagementService,
       lockoutService,
+      sessionService,
+      actionApprovalRepository,
     );
   });
 
@@ -358,11 +411,224 @@ describe("AdminService", () => {
     );
   });
 
-  it("deleteConfession throws if confession missing", async () => {
-    confessionRepository.findOne.mockResolvedValue(null);
+  it("requests confession deletion without executing it", async () => {
+    const confession: any = { id: "c1", isDeleted: false };
+    const approval: any = { id: "approval-1" };
+    confessionRepository.findOne.mockResolvedValue(confession);
+    actionApprovalRepository.save.mockImplementation(async (value: any) => ({
+      ...value,
+      id: approval.id,
+    }));
+
+    const result = await service.requestAdminActionApproval(
+      AdminCriticalAction.CONFESSION_DELETE,
+      "c1",
+      "Policy violation",
+      1,
+    );
+
+    expect(result).toMatchObject({
+      id: "approval-1",
+      action: AdminCriticalAction.CONFESSION_DELETE,
+      targetId: "c1",
+      requestedById: 1,
+      status: AdminActionApprovalStatus.PENDING,
+    });
+    expect(result.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    expect(confession.isDeleted).toBe(false);
+    expect(confessionRepository.save).not.toHaveBeenCalled();
+    expect(moderationService.logAction).toHaveBeenCalledWith(
+      1,
+      AuditActionType.BULK_ACTION,
+      "admin_action_approval",
+      "approval-1",
+      expect.objectContaining({ event: "requested" }),
+      "Policy violation",
+      undefined,
+      expect.anything(),
+    );
+  });
+
+  it("executes deletion only after approval by another administrator", async () => {
+    const approval: any = {
+      id: "approval-1",
+      action: AdminCriticalAction.CONFESSION_DELETE,
+      targetId: "c1",
+      requestedById: 1,
+      approvedById: null,
+      status: AdminActionApprovalStatus.PENDING,
+      reason: "Policy violation",
+      expiresAt: new Date(Date.now() + 60_000),
+    };
+    const confession: any = { id: "c1", isDeleted: false };
+    actionApprovalRepository.findOne.mockResolvedValue(approval);
+    actionApprovalRepository.save.mockImplementation(async (value: any) => value);
+    confessionRepository.findOne.mockResolvedValue(confession);
+    confessionRepository.save.mockImplementation(async (value: any) => value);
+
     await expect(
-      service.deleteConfession("c1", 1, null, undefined),
-    ).rejects.toBeInstanceOf(NotFoundException);
+      service.approveAdminAction("approval-1", 2),
+    ).resolves.toMatchObject({
+      status: AdminActionApprovalStatus.EXECUTED,
+      approvedById: 2,
+    });
+
+    expect(confession.isDeleted).toBe(true);
+    expect(confessionRepository.save).toHaveBeenCalledWith(confession);
+    expect(moderationService.logAction).toHaveBeenCalledTimes(2);
+    expect(moderationService.logAction).toHaveBeenNthCalledWith(
+      1,
+      2,
+      AuditActionType.BULK_ACTION,
+      "admin_action_approval",
+      "approval-1",
+      expect.objectContaining({ event: "approved" }),
+      "Policy violation",
+      undefined,
+      expect.anything(),
+    );
+    expect(moderationService.logAction).toHaveBeenNthCalledWith(
+      2,
+      2,
+      AuditActionType.BULK_ACTION,
+      "admin_action_approval",
+      "approval-1",
+      expect.objectContaining({ event: "executed" }),
+      "Policy violation",
+      undefined,
+      expect.anything(),
+    );
+  });
+
+  it("rejects self-approval without changing or executing the request", async () => {
+    const approval: any = {
+      id: "approval-1",
+      requestedById: 1,
+      status: AdminActionApprovalStatus.PENDING,
+      expiresAt: new Date(Date.now() + 60_000),
+    };
+    actionApprovalRepository.findOne.mockResolvedValue(approval);
+
+    await expect(service.approveAdminAction("approval-1", 1)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    expect(confessionRepository.save).not.toHaveBeenCalled();
+    expect(approval.status).toBe(AdminActionApprovalStatus.PENDING);
+  });
+
+  it("does not mark an approval executed when confession persistence fails", async () => {
+    const approval: any = {
+      id: "approval-1",
+      action: AdminCriticalAction.CONFESSION_DELETE,
+      targetId: "c1",
+      requestedById: 1,
+      status: AdminActionApprovalStatus.PENDING,
+      reason: "Policy violation",
+      expiresAt: new Date(Date.now() + 60_000),
+    };
+    const confession: any = { id: "c1", isDeleted: false };
+    actionApprovalRepository.findOne.mockResolvedValue(approval);
+    confessionRepository.findOne.mockResolvedValue(confession);
+    confessionRepository.save.mockRejectedValue(new Error("database unavailable"));
+
+    await expect(service.approveAdminAction("approval-1", 2)).rejects.toThrow(
+      "database unavailable",
+    );
+
+    expect(actionApprovalRepository.save).not.toHaveBeenCalled();
+    expect(moderationService.logAction).not.toHaveBeenCalled();
+  });
+
+  it("records expiry and rejects approvals whose deadline has passed", async () => {
+    const approval: any = {
+      id: "approval-1",
+      requestedById: 1,
+      status: AdminActionApprovalStatus.PENDING,
+      expiresAt: new Date(Date.now() - 1),
+    };
+    actionApprovalRepository.findOne.mockResolvedValue(approval);
+    actionApprovalRepository.save.mockImplementation(async (value: any) => value);
+
+    await expect(service.approveAdminAction("approval-1", 2)).rejects.toBeInstanceOf(
+      GoneException,
+    );
+
+    expect(approval.status).toBe(AdminActionApprovalStatus.EXPIRED);
+    expect(approval.expiredAt).toBeInstanceOf(Date);
+    expect(confessionRepository.save).not.toHaveBeenCalled();
+    expect(moderationService.logAction).toHaveBeenCalledWith(
+      null,
+      AuditActionType.BULK_ACTION,
+      "admin_action_approval",
+      "approval-1",
+      expect.objectContaining({ event: "expired" }),
+      undefined,
+      undefined,
+      expect.anything(),
+    );
+  });
+
+  it("expires pending requests in the scheduled cleanup transaction", async () => {
+    const approval: any = {
+      id: "approval-2",
+      requestedById: 1,
+      status: AdminActionApprovalStatus.PENDING,
+      reason: "Policy violation",
+      expiresAt: new Date(Date.now() - 60_000),
+    };
+    actionApprovalRepository.createQueryBuilder.mockReturnValue(
+      createChainableQB({
+        getMany: jest.fn().mockResolvedValue([approval]),
+      }),
+    );
+    actionApprovalRepository.save.mockImplementation(async (value: any) => value);
+
+    await expect(service.expirePendingAdminActionApprovals()).resolves.toBe(1);
+
+    expect(approval.status).toBe(AdminActionApprovalStatus.EXPIRED);
+    expect(approval.expiredAt).toBeInstanceOf(Date);
+    expect(moderationService.logAction).toHaveBeenCalledWith(
+      null,
+      AuditActionType.BULK_ACTION,
+      "admin_action_approval",
+      "approval-2",
+      expect.objectContaining({ event: "expired" }),
+      "Policy violation",
+      undefined,
+      expect.anything(),
+    );
+  });
+
+  it("allows only the requester to cancel and records the cancellation", async () => {
+    const approval: any = {
+      id: "approval-1",
+      requestedById: 1,
+      status: AdminActionApprovalStatus.PENDING,
+      reason: "Policy violation",
+      expiresAt: new Date(Date.now() + 60_000),
+    };
+    actionApprovalRepository.findOne.mockResolvedValue(approval);
+    actionApprovalRepository.save.mockImplementation(async (value: any) => value);
+
+    await expect(
+      service.cancelAdminActionApproval("approval-1", 2),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(approval.status).toBe(AdminActionApprovalStatus.PENDING);
+
+    await expect(
+      service.cancelAdminActionApproval("approval-1", 1, "No longer needed"),
+    ).resolves.toMatchObject({ status: AdminActionApprovalStatus.CANCELLED });
+    expect(approval.cancellationReason).toBe("No longer needed");
+    expect(moderationService.logAction).toHaveBeenCalledWith(
+      1,
+      AuditActionType.BULK_ACTION,
+      "admin_action_approval",
+      "approval-1",
+      expect.objectContaining({ event: "cancelled" }),
+      "Policy violation",
+      undefined,
+      expect.anything(),
+    );
   });
 
   it("hide/unhide confession toggles isHidden and logs", async () => {
@@ -600,12 +866,6 @@ describe("AdminService", () => {
           service.dismissReport(objectId, actorIds[actor] as number, null, undefined),
       },
       {
-        name: "deleteConfession",
-        allowed: privileged,
-        invoke: (actor, objectId) =>
-          service.deleteConfession(objectId, actorIds[actor] as number, null, undefined),
-      },
-      {
         name: "banUser",
         allowed: privileged,
         invoke: (actor, objectId) =>
@@ -667,11 +927,6 @@ describe("AdminService", () => {
       reportRepository.findOne.mockResolvedValue(null);
       await assertDenied(() =>
         service.resolveReport("other-tenant-report", 200, null, undefined),
-      );
-
-      confessionRepository.findOne.mockResolvedValue(null);
-      await assertDenied(() =>
-        service.deleteConfession("other-tenant-confession", 200, null, undefined),
       );
 
       userRepository.findOne.mockResolvedValue(null);

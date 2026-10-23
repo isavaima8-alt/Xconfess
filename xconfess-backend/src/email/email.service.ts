@@ -857,6 +857,9 @@ export class EmailService implements OnModuleInit {
         host: config.host,
         port: config.port,
         secure: config.secure,
+        connectionTimeout: this.getSmtpTimeout('MAIL_CONNECTION_TIMEOUT_MS', 5000),
+        greetingTimeout: this.getSmtpTimeout('MAIL_GREETING_TIMEOUT_MS', 5000),
+        socketTimeout: this.getSmtpTimeout('MAIL_SOCKET_TIMEOUT_MS', 10000),
         auth: { user: config.auth.user, pass: config.auth.pass },
       }),
     };
@@ -871,9 +874,19 @@ export class EmailService implements OnModuleInit {
           host: 'smtp.ethereal.email',
           port: 587,
           secure: false,
+          connectionTimeout: this.getSmtpTimeout('MAIL_CONNECTION_TIMEOUT_MS', 5000),
+          greetingTimeout: this.getSmtpTimeout('MAIL_GREETING_TIMEOUT_MS', 5000),
+          socketTimeout: this.getSmtpTimeout('MAIL_SOCKET_TIMEOUT_MS', 10000),
           auth: { user: account.user, pass: account.pass },
         }),
       };
+
+      private getSmtpTimeout(key: string, fallback: number): number {
+        const configured = Number(this.configService.get<number>(key, fallback));
+        return Number.isFinite(configured)
+          ? Math.min(30000, Math.max(500, configured))
+          : fallback;
+      }
       this.logger.log(
         'Ethereal test account ready. Preview at https://ethereal.email',
       );

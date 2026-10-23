@@ -4,6 +4,7 @@ import { Job, Queue } from 'bullmq';
 import { EmailNotificationService } from '../services/email-notification.service';
 import { NotificationType } from '../entities/notification.entity';
 import { AppLogger } from '../../logger/logger.service';
+import { QUEUE_WORKER_CONCURRENCY } from '../../config/queue-concurrency.config';
 
 export const NOTIFICATION_QUEUE = 'notifications';
 export const NOTIFICATION_DLQ = 'notifications-dlq';
@@ -14,6 +15,7 @@ export interface NotificationJobData {
   title: string;
   message: string;
   metadata?: any;
+  correlationId?: string;
   _meta?: {
     originalJobId: string | undefined;
     failedAt: string;
@@ -25,7 +27,9 @@ export interface NotificationJobData {
   };
 }
 
-@Processor(NOTIFICATION_QUEUE)
+@Processor(NOTIFICATION_QUEUE, {
+  concurrency: QUEUE_WORKER_CONCURRENCY.notifications,
+})
 export class NotificationProcessor extends WorkerHost {
   private readonly logger = new Logger(NotificationProcessor.name);
 
@@ -40,28 +44,30 @@ export class NotificationProcessor extends WorkerHost {
 
   // ------------------------------------------------------------------ process
   async process(job: Job<NotificationJobData>): Promise<void> {
-    if (job.name === 'send-notification') {
-      this.logger.log(
-        `Processing notification job ${job.id} (attempt ${job.attemptsMade + 1})` +
-          ` → userId: ${job.data.userId}`,
-      );
+    if (job.name !== 'send-notification') {
+      throw new Error(`Unsupported notification job name: ${job.name}`);
+    }
 
-      this.appLogger.incrementCounter('notification_queue_processing_total', 1, {
+    this.logger.log(
+      `Processing notification job ${job.id} (attempt ${job.attemptsMade + 1})` +
+        ` → userId: ${job.data.userId}`,
+    );
+
+    this.appLogger.incrementCounter('notification_queue_processing_total', 1, {
+      queue: NOTIFICATION_QUEUE,
+      jobName: job.name,
+    });
+
+    const startedAt = Date.now();
+    await this.emailNotificationService.sendEmail(job.data);
+    this.appLogger.observeTimer(
+      'notification_queue_processing_duration_ms',
+      Date.now() - startedAt,
+      {
         queue: NOTIFICATION_QUEUE,
         jobName: job.name,
-      });
-
-      const startedAt = Date.now();
-      await this.emailNotificationService.sendEmail(job.data);
-      this.appLogger.observeTimer(
-        'notification_queue_processing_duration_ms',
-        Date.now() - startedAt,
-        {
-          queue: NOTIFICATION_QUEUE,
-          jobName: job.name,
-        },
-      );
-    }
+      },
+    );
   }
 
   // --------------------------------------------------------------- on:failed
@@ -76,6 +82,17 @@ export class NotificationProcessor extends WorkerHost {
     error: Error,
   ): Promise<void> {
     if (!job) return;
+    const correlationId =
+      job.data.correlationId ?? CorrelationContext.getOrGenerateRequestId();
+    return CorrelationContext.run(correlationId, () =>
+      this.handleFailed(job, error),
+    );
+  }
+
+  private async handleFailed(
+    job: Job<NotificationJobData>,
+    error: Error,
+  ): Promise<void> {
 
     const maxAttempts = (job.opts as any)?.attempts ?? 1;
 

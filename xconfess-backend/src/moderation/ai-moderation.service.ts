@@ -1,7 +1,13 @@
 // src/moderation/ai-moderation.service.ts
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  Optional,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import axios from 'axios';
+import axios, { type AxiosRequestConfig } from 'axios';
+import { AppLogger } from '../logger/logger.service';
 
 export enum ModerationCategory {
   HATE_SPEECH = 'hate_speech',
@@ -42,7 +48,10 @@ export class AiModerationService {
   private requestCount = 0;
   private readonly maxRequestsPerMinute = 50;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    @Optional() private readonly appLogger?: AppLogger,
+  ) {
     this.openAiApiKey = this.configService.get<string>('OPENAI_API_KEY', '');
     this.perspectiveApiKey = this.configService.get<string>(
       'PERSPECTIVE_API_KEY',
@@ -105,13 +114,79 @@ export class AiModerationService {
     }
   }
 
+  private async postProvider<T>(
+    provider: 'openai' | 'perspective',
+    url: string,
+    payload: Record<string, unknown>,
+    config: AxiosRequestConfig,
+  ): Promise<T> {
+    const configuredTimeout = Number(
+      this.configService.get<number>('MODERATION_PROVIDER_TIMEOUT_MS', 5000),
+    );
+    const timeout = Number.isFinite(configuredTimeout)
+      ? Math.min(10000, Math.max(500, configuredTimeout))
+      : 5000;
+    const configuredAttempts = Number(
+      this.configService.get<number>('MODERATION_PROVIDER_MAX_ATTEMPTS', 2),
+    );
+    const maxAttempts = Number.isFinite(configuredAttempts)
+      ? Math.min(3, Math.max(1, Math.floor(configuredAttempts)))
+      : 2;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const response = await axios.post<T>(url, payload, {
+          ...config,
+          timeout,
+        });
+        this.appLogger?.incrementCounter('moderation_provider_attempt_total', 1, {
+          provider,
+          outcome: 'success',
+        });
+        return response.data;
+      } catch (error) {
+        const isAxiosError = axios.isAxiosError(error);
+        const status = isAxiosError ? error.response?.status : undefined;
+        const retryable =
+          isAxiosError &&
+          (status === undefined ||
+            status === 408 ||
+            status === 429 ||
+            status >= 500 ||
+            ['ECONNABORTED', 'ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN'].includes(
+              error.code ?? '',
+            ));
+        const canRetry = retryable && attempt < maxAttempts;
+
+        this.appLogger?.incrementCounter('moderation_provider_attempt_total', 1, {
+          provider,
+          outcome: canRetry ? 'retry' : 'terminal',
+        });
+        if (!canRetry) throw error;
+
+        const backoffCapMs = Math.min(1000, 100 * 2 ** (attempt - 1));
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.floor(Math.random() * backoffCapMs)),
+        );
+      }
+    }
+
+    throw new Error('Moderation provider attempts exhausted');
+  }
+
   private async moderateWithOpenAI(
     content: string,
   ): Promise<ModerationResult | null> {
     if (!this.openAiApiKey) return null;
 
     try {
-      const response = await axios.post(
+      const result = await this.postProvider<{
+        results: Array<{
+          categories: Record<string, boolean>;
+          category_scores: Record<string, number>;
+        }>;
+      }>(
+        'openai',
         'https://api.openai.com/v1/moderations',
         { input: content },
         {
@@ -119,51 +194,50 @@ export class AiModerationService {
             Authorization: `Bearer ${this.openAiApiKey}`,
             'Content-Type': 'application/json',
           },
-          timeout: 5000,
         },
       );
 
-      const result = response.data.results[0];
+      const moderationResult = result.results[0];
       const flags: ModerationCategory[] = [];
       const details: Record<string, number> = {};
 
       if (
-        result.categories.hate &&
+        moderationResult.categories.hate &&
         this.enabledCategories.includes(ModerationCategory.HATE_SPEECH)
       ) {
         flags.push(ModerationCategory.HATE_SPEECH);
-        details.hate_speech = result.category_scores.hate;
+        details.hate_speech = moderationResult.category_scores.hate;
       }
       if (
-        result.categories.harassment &&
+        moderationResult.categories.harassment &&
         this.enabledCategories.includes(ModerationCategory.HARASSMENT)
       ) {
         flags.push(ModerationCategory.HARASSMENT);
-        details.harassment = result.category_scores.harassment;
+        details.harassment = moderationResult.category_scores.harassment;
       }
       if (
-        result.categories['self-harm'] &&
+        moderationResult.categories['self-harm'] &&
         this.enabledCategories.includes(ModerationCategory.SELF_HARM)
       ) {
         flags.push(ModerationCategory.SELF_HARM);
-        details.self_harm = result.category_scores['self-harm'];
+        details.self_harm = moderationResult.category_scores['self-harm'];
       }
       if (
-        result.categories.violence &&
+        moderationResult.categories.violence &&
         this.enabledCategories.includes(ModerationCategory.VIOLENCE)
       ) {
         flags.push(ModerationCategory.VIOLENCE);
-        details.violence = result.category_scores.violence;
+        details.violence = moderationResult.category_scores.violence;
       }
       if (
-        result.categories.sexual &&
+        moderationResult.categories.sexual &&
         this.enabledCategories.includes(ModerationCategory.SEXUAL)
       ) {
         flags.push(ModerationCategory.SEXUAL);
-        details.sexual = result.category_scores.sexual;
+        details.sexual = moderationResult.category_scores.sexual;
       }
 
-      const scores = Object.values(result.category_scores).map((v) =>
+      const scores = Object.values(moderationResult.category_scores).map((v) =>
         typeof v === 'number' ? v : Number(v),
       );
       const maxScore = scores.length > 0 ? Math.max(...scores) : 0;
@@ -175,9 +249,8 @@ export class AiModerationService {
         details,
         requiresReview: false,
       };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.error('OpenAI moderation failed:', message);
+    } catch {
+      this.logger.error('OpenAI moderation provider request failed');
       return null;
     }
   }
@@ -188,7 +261,13 @@ export class AiModerationService {
     if (!this.perspectiveApiKey) return null;
 
     try {
-      const response = await axios.post(
+      const response = await this.postProvider<{
+        attributeScores: Record<
+          string,
+          { summaryScore?: { value?: number } }
+        >;
+      }>(
+        'perspective',
         `https://commentanalyzer.googleapis.com/v1alpha1/comments:analyze?key=${this.perspectiveApiKey}`,
         {
           comment: { text: content },
@@ -200,10 +279,10 @@ export class AiModerationService {
             THREAT: {},
           },
         },
-        { timeout: 5000 },
+        {},
       );
 
-      const attributes = response.data.attributeScores;
+      const attributes = response.attributeScores;
       const flags: ModerationCategory[] = [];
       const details: Record<string, number> = {};
 
@@ -252,9 +331,8 @@ export class AiModerationService {
         details,
         requiresReview: false,
       };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.error('Perspective API moderation failed:', message);
+    } catch {
+      this.logger.error('Perspective moderation provider request failed');
       return null;
     }
   }
